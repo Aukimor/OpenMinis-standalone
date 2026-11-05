@@ -1,0 +1,161 @@
+name: Build and Release Android App
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+      - '1.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/*
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Go 1.25
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Setup Android SDK and NDK r28
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "ndk;28.0.12433566" \
+            "cmake;3.22.1"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.0.12433566" >> $GITHUB_ENV
+
+      - name: Setup persistent Android debug keystore
+        id: cache-keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
+      - name: Restore or generate debug keystore
+        run: |
+          mkdir -p ~/.android
+          if [ -n "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" ]; then
+            echo "Using keystore from secrets.ANDROID_DEBUG_KEYSTORE_BASE64"
+            echo "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
+          elif [ ! -f ~/.android/debug.keystore ]; then
+            echo "Generating persistent deterministic debug keystore..."
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "Using cached ~/.android/debug.keystore"
+          fi
+
+      - name: Cache native dependencies
+        id: cache-native-deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/android/app/src/main/assets/proot-aarch64
+            src/android/app/src/main/assets/alpine-minirootfs.tar.gz
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader32.so
+            src/android/app/libs/rclone.aar
+          key: native-deps-android-${{ hashFiles('deps/build_proot.sh', 'deps/proot/**', 'deps/talloc/**', 'scripts/prepare_android_sandbox.sh', 'deps/build_rclone_android.sh', 'deps/rclone-mobile/**') }}
+          restore-keys: |
+            native-deps-android-
+
+      - name: Build native dependencies (proot + alpine rootfs + rclone.aar)
+        if: steps.cache-native-deps.outputs.cache-hit != 'true'
+        run: |
+          chmod +x ./deps/build_proot.sh ./scripts/prepare_android_sandbox.sh ./deps/build_rclone_android.sh
+          ./deps/build_proot.sh
+          ./scripts/prepare_android_sandbox.sh
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          "$(go env GOPATH)/bin/gomobile" init
+          PATH="$(go env GOPATH)/bin:$PATH" ./deps/build_rclone_android.sh
+          mkdir -p src/android/app/libs
+          cp deps/build/rclone/rclone.aar src/android/app/libs/
+
+      - name: Prepare build configuration
+        run: |
+          if [ ! -f src/android/app/provider-customization.properties ]; then
+            cp src/android/app/provider-customization.properties.example src/android/app/provider-customization.properties
+          fi
+
+      - name: Build APKs with Gradle
+        run: |
+          cd src/android
+          chmod +x gradlew
+          ./gradlew :app:assembleGithubDebug :app:assembleGithubRelease --no-daemon
+
+      - name: Rename and prepare APK artifacts
+        run: |
+          mkdir -p release-apks
+          RELEASE_APK="src/android/app/build/outputs/apk/github/release/app-github-release.apk"
+          DEBUG_APK="src/android/app/build/outputs/apk/github/debug/app-github-debug.apk"
+
+          if [ ! -f "$RELEASE_APK" ]; then
+            RELEASE_APK="src/android/app/build/outputs/apk/release/app-release.apk"
+          fi
+          if [ ! -f "$DEBUG_APK" ]; then
+            DEBUG_APK="src/android/app/build/outputs/apk/debug/app-debug.apk"
+          fi
+
+          cp "$RELEASE_APK" release-apks/MinisApp-1.16-build41-arm64-v8a.apk
+          cp "$DEBUG_APK" release-apks/MinisApp-1.16-build41-arm64-v8a-debug.apk
+
+          ls -lh release-apks/
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openminis-apks
+          path: release-apks/*.apk
+          retention-days: 14
+
+      - name: Publish to GitHub Releases
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '1.16' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Release 1.16 (build 41)' }}
+          draft: false
+          prerelease: false
+          files: |
+            release-apks/MinisApp-1.16-build41-arm64-v8a.apk
+            release-apks/MinisApp-1.16-build41-arm64-v8a-debug.apk

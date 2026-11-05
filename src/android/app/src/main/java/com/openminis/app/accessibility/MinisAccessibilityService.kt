@@ -81,12 +81,18 @@ class MinisAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        val evDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try { event.displayId } catch (_: Throwable) { Display.DEFAULT_DISPLAY }
+        } else {
+            Display.DEFAULT_DISPLAY
+        }
         val rec = RecordedEvent(
             type = AccessibilityEvent.eventTypeToString(event.eventType),
             packageName = event.packageName?.toString(),
             className = event.className?.toString(),
             text = event.text?.joinToString(" ") { it?.toString() ?: "" }?.takeIf { it.isNotBlank() },
             timestamp = System.currentTimeMillis(),
+            displayId = evDisplayId,
         )
         eventRing.offer(rec)
         while (eventRing.size > EVENT_RING_CAP) eventRing.poll()
@@ -118,25 +124,43 @@ class MinisAccessibilityService : AccessibilityService() {
         eventListeners.remove(listener)
     }
 
-    fun rootNodes(): List<AccessibilityNodeInfo> {
+    private fun windowsForDisplay(displayId: Int): List<android.view.accessibility.AccessibilityWindowInfo> {
+        return try {
+            if (displayId != Display.DEFAULT_DISPLAY && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                windowsOnAllDisplays?.get(displayId) ?: emptyList()
+            } else {
+                windows ?: emptyList()
+            }
+        } catch (_: Throwable) {
+            emptyList()
+        }
+    }
+
+    fun rootNodes(displayId: Int = Display.DEFAULT_DISPLAY): List<AccessibilityNodeInfo> {
         val out = ArrayList<AccessibilityNodeInfo>()
         try {
-            for (w in windows ?: emptyList()) {
+            for (w in windowsForDisplay(displayId)) {
                 w.root?.let { out.add(it) }
             }
         } catch (_: Throwable) {}
-        if (out.isEmpty()) {
+        if (out.isEmpty() && displayId == Display.DEFAULT_DISPLAY) {
             try { rootInActiveWindow?.let { out.add(it) } } catch (_: Throwable) {}
         }
         return out
     }
 
-    fun windowInfos(): List<Map<String, Any?>> {
+    fun windowInfos(displayId: Int = Display.DEFAULT_DISPLAY): List<Map<String, Any?>> {
         val out = ArrayList<Map<String, Any?>>()
         try {
-            for (w in windows ?: emptyList()) {
+            for (w in windowsForDisplay(displayId)) {
+                val wDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    try { w.displayId } catch (_: Throwable) { displayId }
+                } else {
+                    Display.DEFAULT_DISPLAY
+                }
                 out.add(mapOf(
                     "windowId" to w.id,
+                    "displayId" to wDisplayId,
                     "type" to when (w.type) {
                         android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION -> "application"
                         android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM -> "system"
@@ -153,16 +177,39 @@ class MinisAccessibilityService : AccessibilityService() {
         return out
     }
 
-    fun foregroundPackage(): Pair<String?, String?> {
+    fun foregroundPackage(displayId: Int = Display.DEFAULT_DISPLAY): Pair<String?, String?> {
+        if (displayId != Display.DEFAULT_DISPLAY) {
+            try {
+                val wins = windowsForDisplay(displayId)
+                val appWin = wins.firstOrNull {
+                    it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION && it.root != null
+                } ?: wins.firstOrNull { it.root != null }
+                val r = appWin?.root
+                if (r != null) {
+                    return (r.packageName?.toString()) to (r.className?.toString())
+                }
+            } catch (_: Throwable) {}
+            return null to null
+        }
         return try {
             val r = rootInActiveWindow
             (r?.packageName?.toString()) to (r?.className?.toString())
         } catch (_: Throwable) { null to null }
     }
 
-    fun dispatchSimpleGesture(path: Path, startTime: Long, durationMs: Long, timeoutMs: Long = 5000): Boolean {
+    fun dispatchSimpleGesture(
+        path: Path,
+        startTime: Long,
+        durationMs: Long,
+        timeoutMs: Long = 5000,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): Boolean {
         val stroke = GestureDescription.StrokeDescription(path, startTime, durationMs)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val builder = GestureDescription.Builder().addStroke(stroke)
+        if (displayId != Display.DEFAULT_DISPLAY && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try { builder.setDisplayId(displayId) } catch (_: Throwable) {}
+        }
+        val gesture = builder.build()
         val done = java.util.concurrent.CountDownLatch(1)
         val ok = booleanArrayOf(false)
         val callback = object : GestureResultCallback() {
@@ -173,7 +220,13 @@ class MinisAccessibilityService : AccessibilityService() {
         return done.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS) && ok[0]
     }
 
-    fun dispatchPinch(cx: Float, cy: Float, scale: Float, durationMs: Long): Boolean {
+    fun dispatchPinch(
+        cx: Float,
+        cy: Float,
+        scale: Float,
+        durationMs: Long,
+        displayId: Int = Display.DEFAULT_DISPLAY,
+    ): Boolean {
         val initialOffset = 200f
         val finalOffset = (initialOffset * scale).coerceAtLeast(20f)
         val (s0, e0) = if (scale > 1f) {
@@ -188,10 +241,13 @@ class MinisAccessibilityService : AccessibilityService() {
         }
         val p0 = Path().apply { moveTo(s0.first, s0.second); lineTo(e0.first, e0.second) }
         val p1 = Path().apply { moveTo(s1.first, s1.second); lineTo(e1.first, e1.second) }
-        val gesture = GestureDescription.Builder()
+        val builder = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p0, 0, durationMs))
             .addStroke(GestureDescription.StrokeDescription(p1, 0, durationMs))
-            .build()
+        if (displayId != Display.DEFAULT_DISPLAY && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try { builder.setDisplayId(displayId) } catch (_: Throwable) {}
+        }
+        val gesture = builder.build()
         val done = java.util.concurrent.CountDownLatch(1)
         val ok = booleanArrayOf(false)
         Handler(Looper.getMainLooper()).post {

@@ -26,3 +26,6 @@
 # NOTE FOR VERIFICATION: debug builds don't minify, so this bug is invisible
 # there. Any change here must be checked against an assembleRelease APK.
 -keep class io.codeconcept.realtimecutvadlibrary.** { *; }
+
+# Keep Mika-derived background virtual display AIDL + Shizuku UserService classes
+-keep class com.openminis.app.virtualdisplay.** { *; }

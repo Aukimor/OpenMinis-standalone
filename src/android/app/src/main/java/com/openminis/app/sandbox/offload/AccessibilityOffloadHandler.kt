@@ -62,6 +62,7 @@ Usage:
   android-a11y-cli <group> <subcommand> [flags]
 
 Groups:
+  bg        start | launch | status | stop (background virtual display)
   ui        dump | find | info | node | screenshot
   tap       node | xy | text | id
   input     text | clear | key
@@ -74,10 +75,20 @@ Groups:
   extract   text | list | form
   service   status | ping
 
+Global display routing flags:
+  --display <id>   Target a specific displayId
+  --bg             Target the active background virtual display
+  --fg             Target the main foreground display (0)
+
 Output: JSON envelope { ok, data | error: { code, message } }.
 Use --compact to emit on a single line; --quiet to strip the envelope.
 
 First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
+"""
+        private const val BG_HELP = """bg start <package> [--width W] [--height H] [--dpi D] [--unmute] [--force]
+bg launch <package> [--unmute] [--force]
+bg status
+bg stop [--kill]
 """
         private const val SERVICE_HELP = "service status | ping\n"
         private const val UI_HELP = """ui dump | find | info | node | screenshot
@@ -357,10 +368,11 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     private fun uiFind(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val limit = args.getInt("limit") ?: 50
         val depth = args.getInt("depth") ?: 30
         val matches = ArrayList<AccessibilityNodeInfo>()
-        for (root in svc.rootNodes()) {
+        for (root in svc.rootNodes(displayId)) {
             findMatching(root, args, depth, 0, matches, limit)
             if (matches.size >= limit) break
         }
@@ -371,7 +383,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         } else {
             for (m in matches) arr.put(nodeToJson(svc.nodeRegistry, m, 0, compact = false))
         }
-        return ok(args, JSONObject().put("count", arr.length()).put("data", arr))
+        return ok(args, JSONObject().put("displayId", displayId).put("count", arr.length()).put("data", arr))
     }
 
     private fun findMatching(
@@ -404,13 +416,15 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     private fun uiInfo(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
-        val (pkg, cls) = svc.foregroundPackage()
-        val windows = svc.windowInfos()
+        val displayId = resolveTargetDisplayId(args)
+        val (pkg, cls) = svc.foregroundPackage(displayId)
+        val windows = svc.windowInfos(displayId)
         val winArr = JSONArray()
         for (w in windows) {
             winArr.put(JSONObject().apply { for ((k, v) in w) put(k, v ?: JSONObject.NULL) })
         }
         return ok(args, JSONObject()
+            .put("displayId", displayId)
             .put("packageName", pkg ?: "")
             .put("activityName", cls ?: "")
             .put("windowCount", windows.size)
@@ -578,28 +592,40 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
     }
 
     private fun tapXYRaw(svc: MinisAccessibilityService, x: Int, y: Int, args: OffloadArgs): NativeOffloadResult {
+        val displayId = resolveTargetDisplayId(args)
         val duration = args.getLong("duration") ?: if (args.hasFlag("long")) 1000L else 50L
+        if (displayId != Display.DEFAULT_DISPLAY && displayId == BackgroundDisplayManager.activeDisplayId && !args.hasFlag("long")) {
+            val injected = BackgroundDisplayManager.tap(displayId, x, y)
+            if (args.hasFlag("double") && injected) {
+                Thread.sleep(80)
+                BackgroundDisplayManager.tap(displayId, x, y)
+            }
+            if (injected) {
+                return ok(args, JSONObject().put("displayId", displayId).put("x", x).put("y", y).put("action", "tap"))
+            }
+        }
         val path = Path().apply {
             moveTo(x.toFloat(), y.toFloat())
             lineTo(x.toFloat() + 0.1f, y.toFloat() + 0.1f)
         }
-        val gestureOk = svc.dispatchSimpleGesture(path, 0L, duration)
+        val gestureOk = svc.dispatchSimpleGesture(path, 0L, duration, displayId = displayId)
         if (args.hasFlag("double")) {
             Thread.sleep(80)
-            svc.dispatchSimpleGesture(path, 0L, duration)
+            svc.dispatchSimpleGesture(path, 0L, duration, displayId = displayId)
         }
-        return if (gestureOk) ok(args, JSONObject().put("x", x).put("y", y).put("action", "tap"))
+        return if (gestureOk) ok(args, JSONObject().put("displayId", displayId).put("x", x).put("y", y).put("action", "tap"))
         else err(args, "GESTURE_FAILED", "dispatchGesture returned cancelled / timed out")
     }
 
     private fun tapText(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val text = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL tap text: missing <text>\n")
         val contains = args.hasFlag("contains")
         val index = args.getInt("index") ?: 0
         val matches = ArrayList<AccessibilityNodeInfo>()
-        for (root in svc.rootNodes()) findByTextOrDesc(root, text, contains, 30, 0, matches)
+        for (root in svc.rootNodes(displayId)) findByTextOrDesc(root, text, contains, 30, 0, matches)
         val n = matches.getOrNull(index)
             ?: return err(args, "NODE_NOT_FOUND",
                 "no node with text${if (contains) " containing " else "="}\"$text\" (matches: ${matches.size})")
@@ -608,7 +634,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             val r = Rect(); n.getBoundsInScreen(r)
             tapXYRaw(svc, r.centerX(), r.centerY(), args)
         }
-        return ok(args, JSONObject().put("text", text).put("action", "click"))
+        return ok(args, JSONObject().put("displayId", displayId).put("text", text).put("action", "click"))
     }
 
     private fun findByTextOrDesc(
@@ -628,14 +654,15 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     private fun tapId(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val rid = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL tap id: missing <resourceId>\n")
         val matches = ArrayList<AccessibilityNodeInfo>()
-        for (root in svc.rootNodes()) findByResourceId(root, rid, 30, 0, matches)
+        for (root in svc.rootNodes(displayId)) findByResourceId(root, rid, 30, 0, matches)
         val n = matches.firstOrNull()
             ?: return err(args, "NODE_NOT_FOUND", "no node with resource-id=$rid")
         return if (n.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-            ok(args, JSONObject().put("resourceId", rid).put("action", "click"))
+            ok(args, JSONObject().put("displayId", displayId).put("resourceId", rid).put("action", "click"))
         else err(args, "ACTION_FAILED", "performAction(CLICK) returned false")
     }
 
@@ -1026,17 +1053,19 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     private fun dialogDetect(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         var dialog: AccessibilityNodeInfo? = null
-        for (root in svc.rootNodes()) {
+        for (root in svc.rootNodes(displayId)) {
             dialog = findFirstByClassNameContains(root, "Dialog", 30, 0)
             if (dialog != null) break
         }
-        if (dialog == null) return ok(args, JSONObject().put("hasDialog", false))
+        if (dialog == null) return ok(args, JSONObject().put("displayId", displayId).put("hasDialog", false))
         val buttons = JSONArray()
         collectClickableTexts(dialog, 10, 0, buttons, svc.nodeRegistry)
         val msg = StringBuilder()
         collectText(dialog, 5, 0, msg)
         return ok(args, JSONObject()
+            .put("displayId", displayId)
             .put("hasDialog", true)
             .put("type", "app_dialog")
             .put("title", "")
@@ -1259,6 +1288,92 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             "notify"   -> if (v == "watch") "a11y_cli: watching notifications" else "a11y_cli: notify $v"
             "dialog"   -> "a11y_cli: dialog $v"
             "extract"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
+            "service"  -> "a11y_cli: service $v"
+            else       -> "Running: a11y_cli $sub"
+        }
+    }
+
+}
+ble Minis under Settings → Accessibility.")
+
+    private fun ok(args: OffloadArgs, data: Any): NativeOffloadResult {
+        val body = JSONObject().put("ok", true).put("data", data).toString()
+        return NativeOffloadResult(0, OffloadOutput.formatBody(body, args) + "\n")
+    }
+
+    private fun err(args: OffloadArgs, code: String, message: String, exit: Int = 1): NativeOffloadResult {
+        val body = JSONObject().put("ok", false).put("error",
+            JSONObject().put("code", code).put("message", message)).toString()
+        return NativeOffloadResult(exit, OffloadOutput.formatBody(body, args) + "\n")
+    }
+
+    /**
+     * [T-bg-overlay phase 2 fix] Human-readable sub-action status surfaced
+     * to the background overlay + FGS notification while the a11y CLI is
+     * running. Format mirrors the CLI's own subcommand vocabulary so a
+     * developer reading logs sees the same thing the agent ran.
+     *
+     * Examples:
+     *   ui dump           → "a11y_cli: dumping UI tree"
+     *   tap by-text Login → "a11y_cli: tap \"Login\""
+     *   input set --text X → "a11y_cli: input text"
+     *   scroll forward    → "a11y_cli: scroll forward"
+     *   event watch       → "a11y_cli: watching events"
+     */
+    private fun statusForSubAction(sub: String, verb: String?, args: OffloadArgs): String {
+        val v = verb ?: ""
+        val target = args.positional.getOrNull(2)?.takeIf { it.isNotBlank() }
+        return when (sub) {
+            "ui" -> when (v) {
+                "dump"       -> "a11y_cli: dumping UI tree"
+                "find"       -> "a11y_cli: finding ${target ?: "element"}"
+                "info"       -> "a11y_cli: reading UI info"
+                "node"       -> "a11y_cli: reading node ${target ?: ""}".trim()
+                "screenshot" -> "a11y_cli: capturing screenshot"
+                else         -> "a11y_cli: ui"
+            }
+            "tap" -> when (v) {
+                "by-text"     -> "a11y_cli: tap \"${target ?: ""}\""
+                "by-id"       -> "a11y_cli: tap #${target ?: ""}"
+                "by-node"     -> "a11y_cli: tap node ${target ?: ""}"
+                "at"          -> "a11y_cli: tap at ($target)"
+                else          -> "a11y_cli: tap"
+            }
+            "input" -> when (v) {
+                "set"   -> "a11y_cli: input text"
+                "clear" -> "a11y_cli: clearing input"
+                else    -> "a11y_cli: input"
+            }
+            "scroll" -> when (v) {
+                "forward", "backward", "up", "down" -> "a11y_cli: scroll $v"
+                "to-text"                            -> "a11y_cli: scrolling to \"${target ?: ""}\""
+                else                                 -> "a11y_cli: scroll"
+            }
+            "gesture"  -> "a11y_cli: gesture${v.takeIf { it.isNotBlank() }?.let { " $it" } ?: ""}"
+            "wait"     -> "a11y_cli: waiting for ${v.ifBlank { "condition" }}"
+            "event"    -> if (v == "watch") "a11y_cli: watching events" else "a11y_cli: event $v"
+            "notify"   -> if (v == "watch") "a11y_cli: watching notifications" else "a11y_cli: notify $v"
+            "dialog"   -> "a11y_cli: dialog $v"
+            "extract"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
+            "service"  -> "a11y_cli: service $v"
+            else       -> "Running: a11y_cli $sub"
+        }
+    }
+
+}
+?.let { " $it" } ?: ""}"
+            "wait"     -> "a11y_cli: waiting for ${v.ifBlank { "condition" }}"
+            "event"    -> if (v == "watch") "a11y_cli: watching events" else "a11y_cli: event $v"
+            "notify"   -> if (v == "watch") "a11y_cli: watching notifications" else "a11y_cli: notify $v"
+            "dialog"   -> "a11y_cli: dialog $v"
+            "extract"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
+            "service"  -> "a11y_cli: service $v"
+            else       -> "Running: a11y_cli $sub"
+        }
+    }
+
+}
+t"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
             "service"  -> "a11y_cli: service $v"
             else       -> "Running: a11y_cli $sub"
         }

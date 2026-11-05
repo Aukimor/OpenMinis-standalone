@@ -342,6 +342,7 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
 
     private fun activityStart(args: OffloadArgs): NativeOffloadResult {
         val cmd = mutableListOf("am", "start", "-W")
+        args.get("display")?.let { cmd.addAll(listOf("--display", it)) }
         args.get("action", "a")?.let { cmd.addAll(listOf("-a", it)) }
         args.get("data", "d")?.let { cmd.addAll(listOf("-d", it)) }
         args.get("package", "p")?.let { cmd.addAll(listOf("-p", it)) }
@@ -671,16 +672,24 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
         }
     }
 
+    private fun inputPrefix(args: OffloadArgs, action: String): MutableList<String> {
+        val cmd = mutableListOf("input")
+        args.get("display", "d")?.let { cmd.addAll(listOf("-d", it)) }
+        cmd.add(action)
+        return cmd
+    }
+
     private fun inputTap(x: String?, y: String?, args: OffloadArgs): NativeOffloadResult {
         if (x.isNullOrBlank() || y.isNullOrBlank()) return errEnvelope("INVALID_ARGS", "input tap <x> <y>", args)
-        val r = ShizukuManager.runProcess(arrayOf("input", "tap", x, y))
+        val cmd = inputPrefix(args, "tap").apply { add(x); add(y) }
+        val r = ShizukuManager.runProcess(cmd.toTypedArray())
         return if (r.exitCode == 0) okEnvelope(JSONObject().put("tap", "$x,$y"), args)
         else errEnvelope("OPERATION_FAILED", failMessage(r), args)
     }
 
     private fun inputSwipe(coords: List<String>, args: OffloadArgs): NativeOffloadResult {
         if (coords.size < 4) return errEnvelope("INVALID_ARGS", "input swipe <x1> <y1> <x2> <y2>", args)
-        val cmd = mutableListOf("input", "swipe", coords[0], coords[1], coords[2], coords[3])
+        val cmd = inputPrefix(args, "swipe").apply { addAll(coords.take(4)) }
         args.get("duration")?.let { cmd.add(it) }
         val r = ShizukuManager.runProcess(cmd.toTypedArray())
         return if (r.exitCode == 0) okEnvelope(JSONObject().put("swipe", coords.take(4)), args)
@@ -689,7 +698,7 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
 
     private fun inputKey(key: String?, args: OffloadArgs): NativeOffloadResult {
         if (key.isNullOrBlank()) return errEnvelope("INVALID_ARGS", "input key <keycode>", args)
-        val cmd = mutableListOf("input", "keyevent")
+        val cmd = inputPrefix(args, "keyevent")
         if (args.hasFlag("long-press")) cmd.add("--longpress")
         cmd.add(key)
         val r = ShizukuManager.runProcess(cmd.toTypedArray())
@@ -701,7 +710,8 @@ class ShizukuOffloadHandler(private val context: Context) : NativeOffloadHandler
         if (text.isBlank()) return errEnvelope("INVALID_ARGS", "input text <text>", args)
         // `input text` doesn't accept spaces directly — replace with %s
         val safe = text.replace(' ', '%').replace("'", "")
-        val r = ShizukuManager.runProcess(arrayOf("input", "text", safe))
+        val cmd = inputPrefix(args, "text").apply { add(safe) }
+        val r = ShizukuManager.runProcess(cmd.toTypedArray())
         return if (r.exitCode == 0) okEnvelope(JSONObject().put("text", text), args)
         else errEnvelope("OPERATION_FAILED", failMessage(r), args)
     }
