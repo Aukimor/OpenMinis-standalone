@@ -20,6 +20,7 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import com.openminis.app.virtualdisplay.BackgroundDisplayManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -998,6 +999,32 @@ internal fun rememberBrowserLiveSnapshot(
         }
     }
     return snapshot
+}
+
+@Composable
+internal fun rememberBackgroundDisplayLiveSnapshot(
+    intervalMs: Long = 200L,
+): Pair<android.graphics.Bitmap?, Boolean> {
+    val activeDisplayId by BackgroundDisplayManager.activeDisplayIdFlow.collectAsState()
+    val frameVersion by BackgroundDisplayManager.frameVersionFlow.collectAsState()
+    val isLive = activeDisplayId >= 0
+    val snapshot by produceState<android.graphics.Bitmap?>(
+        initialValue = BackgroundDisplayManager.getUiPreviewBitmap(),
+        activeDisplayId,
+        frameVersion,
+    ) {
+        value = BackgroundDisplayManager.getUiPreviewBitmap()
+        if (isLive) {
+            while (true) {
+                kotlinx.coroutines.delay(intervalMs)
+                val bmp = BackgroundDisplayManager.getUiPreviewBitmap()
+                if (bmp != null) {
+                    value = bmp
+                }
+            }
+        }
+    }
+    return Pair(snapshot, isLive)
 }
 
 /**

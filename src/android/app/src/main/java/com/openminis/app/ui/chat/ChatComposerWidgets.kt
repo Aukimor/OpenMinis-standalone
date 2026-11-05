@@ -573,6 +573,12 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.STREAMING ||
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
+    val (bgBitmap, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+    val showBgLivePreview = bgBitmap != null && block.toolName != "browser_use" && block.toolName != "read_image" && (
+        bgIsLive ||
+        block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME ||
+        (block.toolName == "shell_execute" && (block.toolArgs.contains("android-a11y") || block.toolArgs.contains("bg ") || block.content.contains("android-a11y") || isLive))
+    )
 
     val thumbnailShape = RoundedCornerShape(8.dp)
     // [T-android-agent-thumbnail-accent] A sub agent's tile is marked while
@@ -688,7 +694,57 @@ private fun ToolPreviewThumbnail(
                 else Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
             ),
     ) {
-        when (block.toolName) {
+        if (showBgLivePreview && bgBitmap != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF0F0F12)),
+            ) {
+                // Dimmed / cropped background layer
+                Image(
+                    bitmap = bgBitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .alpha(0.25f),
+                )
+                // Center full vertical screen without clipping top/bottom
+                Image(
+                    bitmap = bgBitmap.asImageBitmap(),
+                    contentDescription = "Background App Live",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                // Top-left indicator badge
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(4.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.Black.copy(alpha = 0.65f))
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .clip(CircleShape)
+                            .background(if (bgIsLive) Color(0xFF4ADE80) else Color(0xFF8E8E93)),
+                    )
+                    Text(
+                        text = if (bgIsLive) "BG" else "BG · END",
+                        fontSize = 6.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color.White.copy(alpha = 0.9f),
+                        lineHeight = 7.sp,
+                    )
+                }
+            }
+        } else {
+            when (block.toolName) {
             "shell_execute" -> {
                 // iOS: command title + last 12 lines of output in green mono
                 val command = extractShellCommand(args, block)
@@ -971,6 +1027,7 @@ private fun ToolPreviewThumbnail(
 
             else -> GenericThumbContent(block, toolAccent)
         }
+    }
 
         // T141: live CPU/MEM HUD ribbon. Sits at the thumbnail's bottom edge,
         // matching the iOS small-overlay parity (ToolLiveSheet.swift:1926):

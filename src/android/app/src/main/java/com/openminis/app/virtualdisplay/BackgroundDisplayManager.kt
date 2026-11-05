@@ -29,6 +29,19 @@ object BackgroundDisplayManager {
     var activeDisplayId: Int = -1
         private set
 
+    val activeDisplayIdFlow = kotlinx.coroutines.flow.MutableStateFlow(-1)
+
+    val frameVersionFlow = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
+    @Volatile
+    var currentPackageName: String = ""
+
+    @Volatile
+    var activeDisplayWidth: Int = 1080
+
+    @Volatile
+    var activeDisplayHeight: Int = 2400
+
     @Volatile
     var autoRouteA11y: Boolean = false
 
@@ -40,6 +53,8 @@ object BackgroundDisplayManager {
 
     private val frameLock = Any()
     private var latestBitmap: Bitmap? = null
+    private var lastUiPreviewBitmap: Bitmap? = null
+    private var lastPreviewUpdateTs: Long = 0L
 
     data class SessionResult(
         val ok: Boolean,
@@ -147,6 +162,29 @@ object BackgroundDisplayManager {
                     }
                     plane.buffer.rewind()
                     bmp.copyPixelsFromBuffer(plane.buffer)
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastPreviewUpdateTs >= 150L) {
+                        lastPreviewUpdateTs = now
+                        val targetW = (imageReader?.width ?: bmp.width).coerceAtMost(bmp.width)
+                        val targetH = (imageReader?.height ?: bmp.height).coerceAtMost(bmp.height)
+                        try {
+                            val previewWidth = 360
+                            val previewHeight = ((targetH.toLong() * previewWidth) / targetW.coerceAtLeast(1)).toInt().coerceAtLeast(1)
+                            val cropped = if (targetW != bmp.width || targetH != bmp.height) {
+                                Bitmap.createBitmap(bmp, 0, 0, targetW, targetH)
+                            } else {
+                                bmp
+                            }
+                            val scaled = Bitmap.createScaledBitmap(cropped, previewWidth, previewHeight, true)
+                            if (cropped != bmp && cropped != scaled) {
+                                cropped.recycle()
+                            }
+                            lastUiPreviewBitmap = scaled
+                            frameVersionFlow.value = now
+                        } catch (_: Throwable) {
+                        }
+                    }
                 }
             } catch (_: Throwable) {
             } finally {
@@ -164,6 +202,10 @@ object BackgroundDisplayManager {
         }
 
         activeDisplayId = dId
+        activeDisplayIdFlow.value = dId
+        currentPackageName = packageName
+        activeDisplayWidth = width
+        activeDisplayHeight = height
         autoRouteA11y = true
 
         if (muteAudio) {
@@ -194,6 +236,8 @@ object BackgroundDisplayManager {
         }
 
         if (svc != null) {
+            currentPackageName = packageName
+            activeDisplayIdFlow.value = dId
             val code = runCatching { svc.startApp(dId, packageName, -1, force) }.getOrDefault(3)
             if (code == 0) return SessionResult(true, dId, "Launched $packageName on display $dId")
         }
@@ -228,6 +272,7 @@ object BackgroundDisplayManager {
         }
 
         activeDisplayId = -1
+        activeDisplayIdFlow.value = -1
         autoRouteA11y = false
 
         renderHandler?.removeCallbacksAndMessages(null)
@@ -240,6 +285,38 @@ object BackgroundDisplayManager {
         synchronized(frameLock) {
             latestBitmap?.recycle()
             latestBitmap = null
+            // Note: lastUiPreviewBitmap is retained so UI/Compose can continue
+            // showing the last frame safely without throwing recycled bitmap exceptions.
+        }
+    }
+
+    fun getUiPreviewBitmap(): Bitmap? {
+        synchronized(frameLock) {
+            val preview = lastUiPreviewBitmap
+            if (preview != null && !preview.isRecycled) {
+                return preview
+            }
+            val src = latestBitmap ?: return null
+            if (src.isRecycled) return null
+            val targetW = (imageReader?.width ?: src.width).coerceAtMost(src.width)
+            val targetH = (imageReader?.height ?: src.height).coerceAtMost(src.height)
+            return try {
+                val previewWidth = 360
+                val previewHeight = ((targetH.toLong() * previewWidth) / targetW.coerceAtLeast(1)).toInt().coerceAtLeast(1)
+                val cropped = if (targetW != src.width || targetH != src.height) {
+                    Bitmap.createBitmap(src, 0, 0, targetW, targetH)
+                } else {
+                    src
+                }
+                val scaled = Bitmap.createScaledBitmap(cropped, previewWidth, previewHeight, true)
+                if (cropped != src && cropped != scaled) {
+                    cropped.recycle()
+                }
+                lastUiPreviewBitmap = scaled
+                scaled
+            } catch (_: Throwable) {
+                null
+            }
         }
     }
 
@@ -300,6 +377,7 @@ object BackgroundDisplayManager {
         return JSONObject().apply {
             put("active", activeDisplayId >= 0)
             put("activeDisplayId", activeDisplayId)
+            put("packageName", currentPackageName)
             put("autoRouteA11y", autoRouteA11y)
             put("serviceBound", bound)
             put("hasFrame", latestBitmap != null)

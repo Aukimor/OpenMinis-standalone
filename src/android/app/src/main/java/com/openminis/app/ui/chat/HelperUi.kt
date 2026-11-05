@@ -1191,6 +1191,32 @@ internal fun HelperDetailContent(block: AssistantBlock) {
         }
         // [T-subagent-detail-rich] Its recent tool calls, newest first.
         digest?.takeIf { it.total > 0 }?.let { SubAgentToolTimelineCard(it) }
+        // 2.5 background virtual display live / last snapshot
+        val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+        if (bgLiveBmp != null) {
+            val bgTitle = if (bgIsLive) {
+                "后台虚拟屏直播 (Display #${com.openminis.app.virtualdisplay.BackgroundDisplayManager.activeDisplayId})"
+            } else {
+                "后台虚拟屏画面 (${com.openminis.app.virtualdisplay.BackgroundDisplayManager.currentPackageName.ifEmpty { "已结束" }})"
+            }
+            AgentDetailCard(title = bgTitle, icon = toolIconFor("read_image"), iconTint = accent) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF0F0F12)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        bitmap = bgLiveBmp.asImageBitmap(),
+                        contentDescription = "Background Display Preview",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                    )
+                }
+            }
+        }
         // 3. latest screenshot
         latestImagePath?.let { path ->
             val bmp = remember(path) { DisplayBitmapLimits.decodeFileBounded(path) }
