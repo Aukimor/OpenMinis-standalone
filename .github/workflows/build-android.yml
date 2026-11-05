@@ -66,41 +66,6 @@ jobs:
           echo "$SDK_ROOT/cmake/3.22.1/bin" >> $GITHUB_PATH
           echo "$SDK_ROOT/platform-tools" >> $GITHUB_PATH
 
-      - name: Setup persistent Android debug keystore
-        id: cache-keystore
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
-
-      - name: Restore or generate debug keystore
-        run: |
-          mkdir -p ~/.android
-          if [ -n "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" ]; then
-            echo "Using keystore from secrets.ANDROID_DEBUG_KEYSTORE_BASE64"
-            echo "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
-          elif [ ! -f ~/.android/debug.keystore ]; then
-            echo "Generating persistent deterministic debug keystore..."
-            keytool -genkeypair -v \
-              -keystore ~/.android/debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          else
-            echo "Using cached ~/.android/debug.keystore"
-          fi
-
-      - name: Save persistent Android debug keystore
-        if: steps.cache-keystore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
-
       - name: Restore native dependencies cache
         id: cache-native-deps
         uses: actions/cache/restore@v4
@@ -117,7 +82,7 @@ jobs:
             native-deps-android-
 
       - name: Build native dependencies (proot + alpine rootfs + rclone.aar)
-        if: steps.cache-native-deps.outputs.cache-hit != 'true'
+        if: steps.cache-native-deps.outputs.cache-matched-key == ''
         run: |
           chmod +x ./deps/build_proot.sh ./scripts/prepare_android_sandbox.sh ./deps/build_rclone_android.sh
           ./deps/build_proot.sh
@@ -129,7 +94,7 @@ jobs:
           cp deps/build/rclone/rclone.aar src/android/app/libs/
 
       - name: Save native dependencies cache
-        if: steps.cache-native-deps.outputs.cache-hit != 'true'
+        if: steps.cache-native-deps.outputs.cache-matched-key == ''
         uses: actions/cache/save@v4
         with:
           path: |
@@ -154,7 +119,7 @@ jobs:
           ./gradlew :app:assembleGithubDebug --no-daemon --max-workers=2
           ./gradlew :app:assembleGithubRelease --no-daemon --max-workers=2
 
-      - name: Rename and prepare APK artifacts
+      - name: Rename, verify signature, and prepare APK artifacts
         run: |
           mkdir -p release-apks
           RELEASE_APK="src/android/app/build/outputs/apk/github/release/app-github-release.apk"
@@ -170,6 +135,8 @@ jobs:
           cp "$RELEASE_APK" release-apks/MinisApp-1.16.1-build42-arm64-v8a.apk
           cp "$DEBUG_APK" release-apks/MinisApp-1.16.1-build42-arm64-v8a-debug.apk
 
+          echo "Verifying APK signature matches repository minis-signing.keystore..."
+          keytool -printcert -jarfile release-apks/MinisApp-1.16.1-build42-arm64-v8a.apk | grep -i "ED:BE:53:CE:10:9C:05:25:46:78:EB:17:09:3F:91:9E:BE:19:B2:69:7B:60:25:1B:1D:3A:A2:41:58:82:F0:57"
           ls -lh release-apks/
 
       - name: Upload APK artifacts

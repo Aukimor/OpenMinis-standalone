@@ -85,6 +85,18 @@ android {
         }
     }
 
+    signingConfigs {
+        getByName("debug") {
+            val repoKeystore = file("minis-signing.keystore")
+            if (repoKeystore.exists()) {
+                storeFile = repoKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         getByName("debug") {
             buildConfigField("boolean", "DEV_TOOLS", "true")
