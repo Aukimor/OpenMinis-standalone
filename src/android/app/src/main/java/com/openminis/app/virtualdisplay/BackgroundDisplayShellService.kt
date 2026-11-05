@@ -32,6 +32,7 @@ import kotlin.system.exitProcess
  * launches target apps onto it without stealing top focus on Android 14+,
  * injects touch/key events directed at that displayId, and mutes target app audio.
  */
+@SuppressLint("PrivateApi", "DiscouragedPrivateApi")
 class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
 
     private val context: Context
@@ -47,7 +48,6 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         this.context = context
     }
 
-    @SuppressLint("PrivateApi")
     private val displayManager: DisplayManager by lazy {
         DisplayManager::class.java.getDeclaredConstructor(Context::class.java)
             .apply { isAccessible = true }.newInstance(context)
@@ -57,7 +57,6 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)!!
     }
 
-    @get:SuppressLint("PrivateApi")
     private val userActivity: Pair<Any, Method>? by lazy {
         runCatching {
             val binder = Class.forName("android.os.ServiceManager")

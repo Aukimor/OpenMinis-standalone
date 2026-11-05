@@ -68,7 +68,7 @@ jobs:
 
       - name: Setup persistent Android debug keystore
         id: cache-keystore
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/.android/debug.keystore
           key: android-debug-keystore-v1
@@ -94,9 +94,16 @@ jobs:
             echo "Using cached ~/.android/debug.keystore"
           fi
 
-      - name: Cache native dependencies
+      - name: Save persistent Android debug keystore
+        if: steps.cache-keystore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
+      - name: Restore native dependencies cache
         id: cache-native-deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             src/android/app/src/main/assets/proot-aarch64
@@ -121,6 +128,19 @@ jobs:
           mkdir -p src/android/app/libs
           cp deps/build/rclone/rclone.aar src/android/app/libs/
 
+      - name: Save native dependencies cache
+        if: steps.cache-native-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            src/android/app/src/main/assets/proot-aarch64
+            src/android/app/src/main/assets/alpine-minirootfs.tar.gz
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot.so
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader.so
+            src/android/app/src/main/jniLibs/arm64-v8a/libproot-loader32.so
+            src/android/app/libs/rclone.aar
+          key: native-deps-android-${{ hashFiles('deps/build_proot.sh', 'deps/proot/**', 'deps/talloc/**', 'scripts/prepare_android_sandbox.sh', 'deps/build_rclone_android.sh', 'deps/rclone-mobile/**') }}
+
       - name: Prepare build configuration
         run: |
           if [ ! -f src/android/app/provider-customization.properties ]; then
@@ -131,7 +151,8 @@ jobs:
         run: |
           cd src/android
           chmod +x gradlew
-          ./gradlew :app:assembleGithubDebug :app:assembleGithubRelease --no-daemon
+          ./gradlew :app:assembleGithubDebug --no-daemon --max-workers=2
+          ./gradlew :app:assembleGithubRelease --no-daemon --max-workers=2
 
       - name: Rename and prepare APK artifacts
         run: |

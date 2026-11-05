@@ -44,6 +44,7 @@ class MinisAccessibilityService : AccessibilityService() {
         val className: String?,
         val text: String?,
         val timestamp: Long,
+        val displayId: Int = Display.DEFAULT_DISPLAY,
     )
 
     private val eventRing = ConcurrentLinkedQueue<RecordedEvent>()
