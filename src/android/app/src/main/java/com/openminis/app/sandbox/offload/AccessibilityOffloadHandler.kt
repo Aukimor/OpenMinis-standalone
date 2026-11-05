@@ -17,6 +17,7 @@ import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
 import com.openminis.app.sandbox.PRootKernel
+import com.openminis.app.virtualdisplay.BackgroundDisplayManager
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -75,21 +76,12 @@ Groups:
   extract   text | list | form
   service   status | ping
 
-Global display routing flags:
-  --display <id>   Target a specific displayId
-  --bg             Target the active background virtual display
-  --fg             Target the main foreground display (0)
-
 Output: JSON envelope { ok, data | error: { code, message } }.
 Use --compact to emit on a single line; --quiet to strip the envelope.
 
 First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 """
-        private const val BG_HELP = """bg start <package> [--width W] [--height H] [--dpi D] [--unmute] [--force]
-bg launch <package> [--unmute] [--force]
-bg status
-bg stop [--kill]
-"""
+        private const val BG_HELP = "bg start <package> [--width W] [--height H] [--dpi D] [--unmute] [--force] | bg launch <package> | bg status | bg stop [--kill]\n"
         private const val SERVICE_HELP = "service status | ping\n"
         private const val UI_HELP = """ui dump | find | info | node | screenshot
 
@@ -127,6 +119,7 @@ bg stop [--kill]
                 "clickable", "editable", "scrollable", "checked", "enabled",
                 "visible-only", "auto-scroll", "auto-dismiss", "auto-confirm",
                 "confirm", "deny", "children", "ancestors",
+                "bg", "fg", "main-display", "unmute", "force", "kill",
             ),
         )
         if (args.hasFlag("h", "help") || args.positional.isEmpty()) {
@@ -165,6 +158,17 @@ bg stop [--kill]
         // `handle` is not a suspend fun. The prompt self-cancels after
         // AccessibilityRecoveryManager.PROMPT_TIMEOUT_MS so this can never
         // block the worker indefinitely.
+        if (sub == "bg") {
+            com.openminis.app.service.SessionActivityTracker.updateToolStatus(
+                statusForSubAction(sub, args.positional.getOrNull(1), args),
+            )
+            return try {
+                bgSub(args)
+            } catch (e: Throwable) {
+                AppLogger.warning(TAG, "bg uncaught: ${e.javaClass.simpleName} ${e.message}")
+                err(args, "INTERNAL", "${e.javaClass.simpleName}: ${e.message ?: ""}")
+            }
+        }
         if (sub != "service" && sub != "--version") {
             val usable = kotlinx.coroutines.runBlocking {
                 AccessibilityRecoveryManager.ensureGrantOrPrompt(context)
@@ -245,6 +249,72 @@ bg stop [--kill]
         }
     }
 
+    // ── bg ───────────────────────────────────────────────────────────────
+
+    private fun resolveTargetDisplayId(args: OffloadArgs): Int {
+        args.getInt("display")?.let { return it }
+        if (args.hasFlag("fg", "main-display")) return Display.DEFAULT_DISPLAY
+        if (args.hasFlag("bg") && BackgroundDisplayManager.activeDisplayId >= 0) {
+            return BackgroundDisplayManager.activeDisplayId
+        }
+        if (BackgroundDisplayManager.autoRouteA11y && BackgroundDisplayManager.activeDisplayId >= 0) {
+            return BackgroundDisplayManager.activeDisplayId
+        }
+        return Display.DEFAULT_DISPLAY
+    }
+
+    private fun bgSub(args: OffloadArgs): NativeOffloadResult {
+        return when (args.positional.getOrNull(1)) {
+            null -> NativeOffloadResult(2, BG_HELP)
+            "start" -> {
+                val pkg = args.positional.getOrNull(2)
+                    ?: return NativeOffloadResult(2, "$TOOL bg start: missing <package>\n$BG_HELP")
+                val dm = context.resources.displayMetrics
+                val width = args.getInt("width") ?: dm.widthPixels.takeIf { it > 0 } ?: 1080
+                val height = args.getInt("height") ?: dm.heightPixels.takeIf { it > 0 } ?: 2400
+                val dpi = args.getInt("dpi") ?: dm.densityDpi.takeIf { it > 0 } ?: 420
+                val muteAudio = !args.hasFlag("unmute")
+                val force = args.hasFlag("force")
+                val res = BackgroundDisplayManager.startSession(
+                    context = context,
+                    packageName = pkg,
+                    width = width,
+                    height = height,
+                    dpi = dpi,
+                    muteAudio = muteAudio,
+                    force = force,
+                )
+                if (!res.ok) return err(args, "BG_START_FAILED", res.message)
+                ok(args, JSONObject()
+                    .put("displayId", res.displayId)
+                    .put("packageName", pkg)
+                    .put("width", width)
+                    .put("height", height)
+                    .put("dpi", dpi)
+                    .put("muted", muteAudio)
+                    .put("autoRouteA11y", BackgroundDisplayManager.autoRouteA11y)
+                    .put("message", res.message))
+            }
+            "launch" -> {
+                val pkg = args.positional.getOrNull(2)
+                    ?: return NativeOffloadResult(2, "$TOOL bg launch: missing <package>\n$BG_HELP")
+                val muteAudio = !args.hasFlag("unmute")
+                val force = args.hasFlag("force")
+                val res = BackgroundDisplayManager.launchApp(context, pkg, muteAudio = muteAudio, force = force)
+                if (!res.ok) return err(args, "BG_LAUNCH_FAILED", res.message)
+                ok(args, JSONObject().put("displayId", res.displayId).put("packageName", pkg).put("message", res.message))
+            }
+            "status" -> ok(args, BackgroundDisplayManager.status())
+            "stop" -> {
+                val prevId = BackgroundDisplayManager.activeDisplayId
+                val kill = args.hasFlag("kill")
+                BackgroundDisplayManager.stopSession(killPackages = kill)
+                ok(args, JSONObject().put("stoppedDisplayId", prevId).put("killed", kill))
+            }
+            else -> NativeOffloadResult(2, "$TOOL bg: unknown action\n$BG_HELP")
+        }
+    }
+
     // ── service ──────────────────────────────────────────────────────────
 
     private fun serviceSub(args: OffloadArgs): NativeOffloadResult {
@@ -307,14 +377,15 @@ bg stop [--kill]
 
     private fun uiDump(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val maxDepth = args.getInt("depth") ?: 10
         val compact = args.hasFlag("compact")
         val visibleOnly = args.getBool("visible-only") ?: true
         val arr = JSONArray()
-        for (root in svc.rootNodes()) {
+        for (root in svc.rootNodes(displayId)) {
             walkNode(svc.nodeRegistry, root, 0, maxDepth, visibleOnly, compact, arr)
         }
-        return ok(args, JSONObject().put("count", arr.length()).put("nodes", arr))
+        return ok(args, JSONObject().put("displayId", displayId).put("count", arr.length()).put("nodes", arr))
     }
 
     private fun walkNode(
@@ -455,19 +526,26 @@ bg stop [--kill]
     }
 
     private fun uiScreenshot(args: OffloadArgs, sessionId: String?): NativeOffloadResult {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return err(args, "NOT_SUPPORTED",
-                "ui screenshot requires Android 11 (API 30); use `android-shizuku-cli exec screencap` instead.")
-        }
-        val svc = svcOrThrow()
         val scale = (args.getDouble("scale") ?: 0.5).toFloat().coerceIn(0.05f, 1.0f)
-        val displayId = args.getInt("display") ?: Display.DEFAULT_DISPLAY
+        val displayId = resolveTargetDisplayId(args)
         val inline = args.hasFlag("inline", "b")
 
-        val shot = svc.captureScreenshot(displayId)
-        val raw = shot.bitmap
-            ?: return err(args, shot.errorCode ?: "TAKE_SCREENSHOT_FAILED",
+        val bgBitmap = if (displayId != Display.DEFAULT_DISPLAY) {
+            BackgroundDisplayManager.captureBitmap(displayId)
+        } else null
+
+        val raw: Bitmap = if (bgBitmap != null) {
+            bgBitmap
+        } else {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                return err(args, "NOT_SUPPORTED",
+                    "ui screenshot requires Android 11 (API 30); use `android-shizuku-cli exec screencap` instead.")
+            }
+            val svc = svcOrThrow()
+            val shot = svc.captureScreenshot(displayId)
+            shot.bitmap ?: return err(args, shot.errorCode ?: "TAKE_SCREENSHOT_FAILED",
                 shot.errorMessage ?: "takeScreenshot failed")
+        }
 
         val origW = raw.width
         val origH = raw.height
@@ -714,8 +792,21 @@ bg stop [--kill]
 
     private fun inputKey(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val keyName = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL input key: missing <keycode>\n")
+        if (displayId != Display.DEFAULT_DISPLAY && displayId == BackgroundDisplayManager.activeDisplayId) {
+            val keyCode = when (keyName.uppercase()) {
+                "BACK" -> android.view.KeyEvent.KEYCODE_BACK
+                "HOME" -> android.view.KeyEvent.KEYCODE_HOME
+                "RECENTS" -> android.view.KeyEvent.KEYCODE_APP_SWITCH
+                "ENTER" -> android.view.KeyEvent.KEYCODE_ENTER
+                else -> keyName.toIntOrNull()
+            }
+            if (keyCode != null && BackgroundDisplayManager.key(displayId, keyCode)) {
+                return ok(args, JSONObject().put("displayId", displayId).put("key", keyName.uppercase()))
+            }
+        }
         return when (keyName.uppercase()) {
             "BACK" -> { svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK); ok(args, JSONObject().put("key", "BACK")) }
             "HOME" -> { svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME); ok(args, JSONObject().put("key", "HOME")) }
@@ -728,7 +819,8 @@ bg stop [--kill]
 
     private fun resolveTargetEditable(svc: MinisAccessibilityService, args: OffloadArgs): AccessibilityNodeInfo? {
         args.get("node")?.let { id -> return svc.nodeRegistry.get(id) }
-        for (root in svc.rootNodes()) {
+        val displayId = resolveTargetDisplayId(args)
+        for (root in svc.rootNodes(displayId)) {
             val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             if (focused != null) return focused
         }
@@ -767,6 +859,7 @@ bg stop [--kill]
 
     private fun scrollXY(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val x = args.positional.getOrNull(2)?.toIntOrNull()
             ?: return NativeOffloadResult(2, "$TOOL scroll xy: missing <x>\n")
         val y = args.positional.getOrNull(3)?.toIntOrNull()
@@ -781,14 +874,20 @@ bg stop [--kill]
             "right" -> -distance to 0
             else -> return err(args, "INVALID_ARGS", "--direction must be up|down|left|right")
         }
+        if (displayId != Display.DEFAULT_DISPLAY && displayId == BackgroundDisplayManager.activeDisplayId) {
+            if (BackgroundDisplayManager.swipe(displayId, x, y, x + dx, y + dy, duration.toInt())) {
+                return ok(args, JSONObject().put("displayId", displayId).put("direction", direction).put("distance", distance))
+            }
+        }
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()); lineTo((x + dx).toFloat(), (y + dy).toFloat()) }
-        return if (svc.dispatchSimpleGesture(path, 0L, duration))
-            ok(args, JSONObject().put("direction", direction).put("distance", distance))
+        return if (svc.dispatchSimpleGesture(path, 0L, duration, displayId = displayId))
+            ok(args, JSONObject().put("displayId", displayId).put("direction", direction).put("distance", distance))
         else err(args, "GESTURE_FAILED", "scroll gesture cancelled")
     }
 
     private fun scrollToText(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val text = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL scroll to-text: missing <text>\n")
         val maxScrolls = args.getInt("max-scrolls") ?: 10
@@ -802,23 +901,24 @@ bg stop [--kill]
         }
         repeat(maxScrolls) {
             val matches = ArrayList<AccessibilityNodeInfo>()
-            for (root in svc.rootNodes()) findByTextOrDesc(root, text, contains = true, 30, 0, matches)
+            for (root in svc.rootNodes(displayId)) findByTextOrDesc(root, text, contains = true, 30, 0, matches)
             val hit = matches.firstOrNull()
             if (hit != null) return ok(args, JSONObject()
+                .put("displayId", displayId)
                 .put("found", true)
                 .put("node", nodeToJson(svc.nodeRegistry, hit, 0, compact = true)))
             val scrolled = container?.performAction(action) ?: run {
                 var any = false
-                for (root in svc.rootNodes()) {
+                for (root in svc.rootNodes(displayId)) {
                     val s = firstScrollable(root, 30, 0)
                     if (s != null) { any = s.performAction(action); break }
                 }
                 any
             }
-            if (!scrolled) return ok(args, JSONObject().put("found", false).put("reason", "scroll_action_rejected"))
+            if (!scrolled) return ok(args, JSONObject().put("displayId", displayId).put("found", false).put("reason", "scroll_action_rejected"))
             Thread.sleep(400)
         }
-        return ok(args, JSONObject().put("found", false))
+        return ok(args, JSONObject().put("displayId", displayId).put("found", false))
     }
 
     private fun firstScrollable(node: AccessibilityNodeInfo?, maxDepth: Int, depth: Int): AccessibilityNodeInfo? {
@@ -842,30 +942,38 @@ bg stop [--kill]
 
     private fun gestureSwipe(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val x1 = args.positional.getOrNull(2)?.toIntOrNull() ?: return NativeOffloadResult(2, "$TOOL gesture swipe: missing <x1>\n")
         val y1 = args.positional.getOrNull(3)?.toIntOrNull() ?: return NativeOffloadResult(2, "$TOOL gesture swipe: missing <y1>\n")
         val x2 = args.positional.getOrNull(4)?.toIntOrNull() ?: return NativeOffloadResult(2, "$TOOL gesture swipe: missing <x2>\n")
         val y2 = args.positional.getOrNull(5)?.toIntOrNull() ?: return NativeOffloadResult(2, "$TOOL gesture swipe: missing <y2>\n")
         val duration = args.getLong("duration") ?: 300L
+        if (displayId != Display.DEFAULT_DISPLAY && displayId == BackgroundDisplayManager.activeDisplayId) {
+            if (BackgroundDisplayManager.swipe(displayId, x1, y1, x2, y2, duration.toInt())) {
+                return ok(args, JSONObject().put("displayId", displayId).put("from", JSONArray().put(x1).put(y1)).put("to", JSONArray().put(x2).put(y2)))
+            }
+        }
         val path = Path().apply { moveTo(x1.toFloat(), y1.toFloat()); lineTo(x2.toFloat(), y2.toFloat()) }
-        return if (svc.dispatchSimpleGesture(path, 0L, duration))
-            ok(args, JSONObject().put("from", JSONArray().put(x1).put(y1)).put("to", JSONArray().put(x2).put(y2)))
+        return if (svc.dispatchSimpleGesture(path, 0L, duration, displayId = displayId))
+            ok(args, JSONObject().put("displayId", displayId).put("from", JSONArray().put(x1).put(y1)).put("to", JSONArray().put(x2).put(y2)))
         else err(args, "GESTURE_FAILED", "swipe cancelled")
     }
 
     private fun gesturePinch(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val cx = args.positional.getOrNull(2)?.toFloatOrNull() ?: return NativeOffloadResult(2, "$TOOL gesture pinch: missing <cx>\n")
         val cy = args.positional.getOrNull(3)?.toFloatOrNull() ?: return NativeOffloadResult(2, "$TOOL gesture pinch: missing <cy>\n")
         val scale = args.getDouble("scale")?.toFloat() ?: 0.5f
         val duration = args.getLong("duration") ?: 300L
-        return if (svc.dispatchPinch(cx, cy, scale, duration))
-            ok(args, JSONObject().put("center", JSONArray().put(cx).put(cy)).put("scale", scale))
+        return if (svc.dispatchPinch(cx, cy, scale, duration, displayId = displayId))
+            ok(args, JSONObject().put("displayId", displayId).put("center", JSONArray().put(cx).put(cy)).put("scale", scale))
         else err(args, "GESTURE_FAILED", "pinch cancelled")
     }
 
     private fun gesturePath(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val pointsStr = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL gesture path: missing <points>\n")
         val pts = pointsStr.split(":").map {
@@ -878,8 +986,8 @@ bg stop [--kill]
             for (i in 1 until pts.size) lineTo(pts[i].first, pts[i].second)
         }
         val duration = args.getLong("duration") ?: (pts.size * 100L)
-        return if (svc.dispatchSimpleGesture(path, 0L, duration))
-            ok(args, JSONObject().put("points", pts.size))
+        return if (svc.dispatchSimpleGesture(path, 0L, duration, displayId = displayId))
+            ok(args, JSONObject().put("displayId", displayId).put("points", pts.size))
         else err(args, "GESTURE_FAILED", "path cancelled")
     }
 
@@ -898,6 +1006,7 @@ bg stop [--kill]
 
     private fun waitAppear(args: OffloadArgs, present: Boolean): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val timeout = args.getLong("timeout") ?: 10_000L
         val deadline = System.currentTimeMillis() + timeout
         val targetText = args.get("text") ?: args.get("text-contains")
@@ -905,21 +1014,21 @@ bg stop [--kill]
         val targetId = args.get("id")
         val targetClass = args.get("class")
         while (System.currentTimeMillis() < deadline) {
-            for (root in svc.rootNodes()) {
+            for (root in svc.rootNodes(displayId)) {
                 val matches = ArrayList<AccessibilityNodeInfo>()
                 if (targetText != null) findByTextOrDesc(root, targetText, contains = containsOnly, 30, 0, matches)
                 if (targetId != null) findByResourceId(root, targetId, 30, 0, matches)
                 if (targetClass != null) findByClassName(root, targetClass, 30, 0, matches)
                 val found = matches.isNotEmpty()
                 if (found == present) {
-                    return if (present) ok(args, JSONObject().put("found", true)
+                    return if (present) ok(args, JSONObject().put("displayId", displayId).put("found", true)
                         .put("node", nodeToJson(svc.nodeRegistry, matches.first(), 0, compact = true)))
-                    else ok(args, JSONObject().put("disappeared", true))
+                    else ok(args, JSONObject().put("displayId", displayId).put("disappeared", true))
                 }
             }
             Thread.sleep(200)
         }
-        return ok(args, JSONObject().put("found", false).put("timedOut", true))
+        return ok(args, JSONObject().put("displayId", displayId).put("found", false).put("timedOut", true))
     }
 
     private fun findByClassName(node: AccessibilityNodeInfo?, cls: String, maxDepth: Int, depth: Int, out: MutableList<AccessibilityNodeInfo>) {
@@ -930,32 +1039,33 @@ bg stop [--kill]
 
     private fun waitStable(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val interval = args.getLong("interval") ?: 200L
         val stableDuration = args.getLong("duration") ?: 500L
         val timeout = args.getLong("timeout") ?: 8000L
         val start = System.currentTimeMillis()
         val deadline = start + timeout
-        var lastSig = treeSignature(svc)
+        var lastSig = treeSignature(svc, displayId)
         var stableSince = System.currentTimeMillis()
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(interval)
-            val sig = treeSignature(svc)
+            val sig = treeSignature(svc, displayId)
             if (sig != lastSig) { lastSig = sig; stableSince = System.currentTimeMillis() }
             else if (System.currentTimeMillis() - stableSince >= stableDuration) {
-                return ok(args, JSONObject().put("stable", true).put("waitedMs", System.currentTimeMillis() - start))
+                return ok(args, JSONObject().put("displayId", displayId).put("stable", true).put("waitedMs", System.currentTimeMillis() - start))
             }
         }
-        return ok(args, JSONObject().put("stable", false).put("timedOut", true))
+        return ok(args, JSONObject().put("displayId", displayId).put("stable", false).put("timedOut", true))
     }
 
-    private fun treeSignature(svc: MinisAccessibilityService): Int {
+    private fun treeSignature(svc: MinisAccessibilityService, displayId: Int): Int {
         var h = 0
-        for (root in svc.rootNodes()) {
+        for (root in svc.rootNodes(displayId)) {
             h = h * 31 + (root.text?.hashCode() ?: 0)
             h = h * 31 + root.childCount
             h = h * 31 + root.windowId
         }
-        val (pkg, cls) = svc.foregroundPackage()
+        val (pkg, cls) = svc.foregroundPackage(displayId)
         h = h * 31 + (pkg?.hashCode() ?: 0)
         h = h * 31 + (cls?.hashCode() ?: 0)
         return h
@@ -963,18 +1073,19 @@ bg stop [--kill]
 
     private fun waitActivity(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val timeout = args.getLong("timeout") ?: 10_000L
         val pkg = args.get("package")
         val act = args.get("activity")
         val deadline = System.currentTimeMillis() + timeout
         while (System.currentTimeMillis() < deadline) {
-            val (p, c) = svc.foregroundPackage()
+            val (p, c) = svc.foregroundPackage(displayId)
             val pkgOk = pkg == null || p == pkg
             val actOk = act == null || c == act || (act.startsWith(".") && (c?.endsWith(act) == true))
-            if (pkgOk && actOk) return ok(args, JSONObject().put("packageName", p ?: "").put("activityName", c ?: ""))
+            if (pkgOk && actOk) return ok(args, JSONObject().put("displayId", displayId).put("packageName", p ?: "").put("activityName", c ?: ""))
             Thread.sleep(200)
         }
-        return ok(args, JSONObject().put("timedOut", true))
+        return ok(args, JSONObject().put("displayId", displayId).put("timedOut", true))
     }
 
     // ── event / notify / dialog ──────────────────────────────────────────
@@ -1106,19 +1217,24 @@ bg stop [--kill]
             deny    -> listOf("拒绝", "取消", "否", "不允许", "Cancel", "Deny", "No")
             else    -> listOf("取消", "关闭", "否", "Cancel", "Close")
         }
+        val displayId = resolveTargetDisplayId(args)
         for (label in candidates) {
             val matches = ArrayList<AccessibilityNodeInfo>()
-            for (root in svc.rootNodes()) findByTextOrDesc(root, label, contains = false, 30, 0, matches)
+            for (root in svc.rootNodes(displayId)) findByTextOrDesc(root, label, contains = false, 30, 0, matches)
             val btn = matches.firstOrNull { it.isClickable } ?: matches.firstOrNull()
             if (btn != null) {
                 val clicked = if (btn.isClickable) btn.performAction(AccessibilityNodeInfo.ACTION_CLICK) else {
                     val r = Rect(); btn.getBoundsInScreen(r)
-                    svc.dispatchSimpleGesture(
-                        Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()); lineTo(r.exactCenterX() + 0.1f, r.exactCenterY() + 0.1f) },
-                        0L, 50L
-                    )
+                    if (displayId != Display.DEFAULT_DISPLAY && displayId == BackgroundDisplayManager.activeDisplayId) {
+                        BackgroundDisplayManager.tap(displayId, r.centerX(), r.centerY())
+                    } else {
+                        svc.dispatchSimpleGesture(
+                            Path().apply { moveTo(r.exactCenterX(), r.exactCenterY()); lineTo(r.exactCenterX() + 0.1f, r.exactCenterY() + 0.1f) },
+                            0L, 50L, displayId = displayId,
+                        )
+                    }
                 }
-                if (clicked) return ok(args, JSONObject().put("dismissed", true).put("button", label))
+                if (clicked) return ok(args, JSONObject().put("displayId", displayId).put("dismissed", true).put("button", label))
             }
         }
         return err(args, "NODE_NOT_FOUND", "no matching dismiss button found (looked for: ${candidates.joinToString()})")
@@ -1139,15 +1255,16 @@ bg stop [--kill]
 
     private fun extractText(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val nodeId = args.get("node")
         val sep = args.get("separator") ?: "\n"
-        val roots = if (nodeId != null) listOfNotNull(svc.nodeRegistry.get(nodeId)) else svc.rootNodes()
+        val roots = if (nodeId != null) listOfNotNull(svc.nodeRegistry.get(nodeId)) else svc.rootNodes(displayId)
         if (roots.isEmpty()) return err(args, "NODE_NOT_FOUND", "no roots / node=$nodeId")
         val arr = JSONArray()
         val sb = StringBuilder()
         for (root in roots) collectVisibleText(root, 50, 0, arr, sb, sep)
         return if (args.get("format") == "json")
-            ok(args, JSONObject().put("count", arr.length()).put("data", arr))
+            ok(args, JSONObject().put("displayId", displayId).put("count", arr.length()).put("data", arr))
         else NativeOffloadResult(0, sb.toString())
     }
 
@@ -1167,12 +1284,13 @@ bg stop [--kill]
 
     private fun extractList(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val nodeId = args.get("node")
         val maxItems = args.getInt("max-items") ?: 100
         val autoScroll = args.hasFlag("auto-scroll")
         val container: AccessibilityNodeInfo = (nodeId?.let { svc.nodeRegistry.get(it) }) ?: run {
             var found: AccessibilityNodeInfo? = null
-            for (root in svc.rootNodes()) { found = firstScrollable(root, 30, 0); if (found != null) break }
+            for (root in svc.rootNodes(displayId)) { found = firstScrollable(root, 30, 0); if (found != null) break }
             found ?: return err(args, "NODE_NOT_FOUND", "no scrollable container; pass --node")
         }
         val items = LinkedHashMap<String, JSONObject>()
@@ -1201,11 +1319,12 @@ bg stop [--kill]
 
     private fun extractForm(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val nodeId = args.get("node")
-        val roots = if (nodeId != null) listOfNotNull(svc.nodeRegistry.get(nodeId)) else svc.rootNodes()
+        val roots = if (nodeId != null) listOfNotNull(svc.nodeRegistry.get(nodeId)) else svc.rootNodes(displayId)
         val arr = JSONArray()
         for (root in roots) collectFormFields(root, 30, 0, arr, svc.nodeRegistry)
-        return ok(args, JSONObject().put("count", arr.length()).put("data", arr))
+        return ok(args, JSONObject().put("displayId", displayId).put("count", arr.length()).put("data", arr))
     }
 
     private fun collectFormFields(node: AccessibilityNodeInfo?, maxDepth: Int, depth: Int, arr: JSONArray, registry: NodeRegistry) {
@@ -1288,92 +1407,6 @@ bg stop [--kill]
             "notify"   -> if (v == "watch") "a11y_cli: watching notifications" else "a11y_cli: notify $v"
             "dialog"   -> "a11y_cli: dialog $v"
             "extract"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
-            "service"  -> "a11y_cli: service $v"
-            else       -> "Running: a11y_cli $sub"
-        }
-    }
-
-}
-ble Minis under Settings → Accessibility.")
-
-    private fun ok(args: OffloadArgs, data: Any): NativeOffloadResult {
-        val body = JSONObject().put("ok", true).put("data", data).toString()
-        return NativeOffloadResult(0, OffloadOutput.formatBody(body, args) + "\n")
-    }
-
-    private fun err(args: OffloadArgs, code: String, message: String, exit: Int = 1): NativeOffloadResult {
-        val body = JSONObject().put("ok", false).put("error",
-            JSONObject().put("code", code).put("message", message)).toString()
-        return NativeOffloadResult(exit, OffloadOutput.formatBody(body, args) + "\n")
-    }
-
-    /**
-     * [T-bg-overlay phase 2 fix] Human-readable sub-action status surfaced
-     * to the background overlay + FGS notification while the a11y CLI is
-     * running. Format mirrors the CLI's own subcommand vocabulary so a
-     * developer reading logs sees the same thing the agent ran.
-     *
-     * Examples:
-     *   ui dump           → "a11y_cli: dumping UI tree"
-     *   tap by-text Login → "a11y_cli: tap \"Login\""
-     *   input set --text X → "a11y_cli: input text"
-     *   scroll forward    → "a11y_cli: scroll forward"
-     *   event watch       → "a11y_cli: watching events"
-     */
-    private fun statusForSubAction(sub: String, verb: String?, args: OffloadArgs): String {
-        val v = verb ?: ""
-        val target = args.positional.getOrNull(2)?.takeIf { it.isNotBlank() }
-        return when (sub) {
-            "ui" -> when (v) {
-                "dump"       -> "a11y_cli: dumping UI tree"
-                "find"       -> "a11y_cli: finding ${target ?: "element"}"
-                "info"       -> "a11y_cli: reading UI info"
-                "node"       -> "a11y_cli: reading node ${target ?: ""}".trim()
-                "screenshot" -> "a11y_cli: capturing screenshot"
-                else         -> "a11y_cli: ui"
-            }
-            "tap" -> when (v) {
-                "by-text"     -> "a11y_cli: tap \"${target ?: ""}\""
-                "by-id"       -> "a11y_cli: tap #${target ?: ""}"
-                "by-node"     -> "a11y_cli: tap node ${target ?: ""}"
-                "at"          -> "a11y_cli: tap at ($target)"
-                else          -> "a11y_cli: tap"
-            }
-            "input" -> when (v) {
-                "set"   -> "a11y_cli: input text"
-                "clear" -> "a11y_cli: clearing input"
-                else    -> "a11y_cli: input"
-            }
-            "scroll" -> when (v) {
-                "forward", "backward", "up", "down" -> "a11y_cli: scroll $v"
-                "to-text"                            -> "a11y_cli: scrolling to \"${target ?: ""}\""
-                else                                 -> "a11y_cli: scroll"
-            }
-            "gesture"  -> "a11y_cli: gesture${v.takeIf { it.isNotBlank() }?.let { " $it" } ?: ""}"
-            "wait"     -> "a11y_cli: waiting for ${v.ifBlank { "condition" }}"
-            "event"    -> if (v == "watch") "a11y_cli: watching events" else "a11y_cli: event $v"
-            "notify"   -> if (v == "watch") "a11y_cli: watching notifications" else "a11y_cli: notify $v"
-            "dialog"   -> "a11y_cli: dialog $v"
-            "extract"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
-            "service"  -> "a11y_cli: service $v"
-            else       -> "Running: a11y_cli $sub"
-        }
-    }
-
-}
-?.let { " $it" } ?: ""}"
-            "wait"     -> "a11y_cli: waiting for ${v.ifBlank { "condition" }}"
-            "event"    -> if (v == "watch") "a11y_cli: watching events" else "a11y_cli: event $v"
-            "notify"   -> if (v == "watch") "a11y_cli: watching notifications" else "a11y_cli: notify $v"
-            "dialog"   -> "a11y_cli: dialog $v"
-            "extract"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
-            "service"  -> "a11y_cli: service $v"
-            else       -> "Running: a11y_cli $sub"
-        }
-    }
-
-}
-t"  -> "a11y_cli: extracting ${v.ifBlank { "text" }}"
             "service"  -> "a11y_cli: service $v"
             else       -> "Running: a11y_cli $sub"
         }
