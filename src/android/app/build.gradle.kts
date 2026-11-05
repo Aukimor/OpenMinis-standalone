@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 43
-        versionName = "1.16.2"
+        versionCode = 44
+        versionName = "1.16.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -498,6 +498,10 @@ dependencies {
     // incompatible androidx.core / minSdk for zero added capability.
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
+
+    // On-device offline Chinese + Latin OCR (ported from Mika PhoneOcr)
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
 
     // Testing — JVM unit tests
     testImplementation("junit:junit:4.13.2")

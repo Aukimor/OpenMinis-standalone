@@ -15,5 +15,7 @@ interface IBackgroundDisplayService {
     boolean setAudioMuted(String packageName, boolean muted) = 10;
     void settleBehind(int displayId) = 11;
     void releaseAll() = 12;
+    boolean pasteText(int displayId, String text) = 13;
+    int pullBackSpilledTasks(int displayId, String targetPackage) = 14;
     void destroy() = 16777114;
 }

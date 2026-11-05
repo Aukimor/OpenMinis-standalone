@@ -9,6 +9,7 @@ import android.os.Build
 import android.view.Display
 import android.view.accessibility.AccessibilityNodeInfo
 import com.openminis.app.accessibility.AccessibilityRecoveryManager
+import com.openminis.app.accessibility.LocalScreenOcr
 import com.openminis.app.accessibility.MinisAccessibilityService
 import com.openminis.app.accessibility.NodeRegistry
 import com.openminis.app.accessibility.RestrictedSettingsManager
@@ -119,7 +120,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                 "clickable", "editable", "scrollable", "checked", "enabled",
                 "visible-only", "auto-scroll", "auto-dismiss", "auto-confirm",
                 "confirm", "deny", "children", "ancestors",
-                "bg", "fg", "main-display", "unmute", "force", "kill",
+                "bg", "fg", "main-display", "unmute", "force", "kill", "ocr",
             ),
         )
         if (args.hasFlag("h", "help") || args.positional.isEmpty()) {
@@ -226,6 +227,7 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                         com.openminis.app.sandbox.ExecutionCoordinator.mountedSessionIdFor(it)
                     },
                 )
+                "batch"     -> batchSub(args, request)
                 "tap"       -> tapSub(args)
                 "input"     -> inputSub(args)
                 "scroll"    -> scrollSub(args)
@@ -363,10 +365,82 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
      * bind-mount map last. Null when the call did not come from an agent shell
      * (e.g. the interactive terminal).
      */
+    private fun captureTargetBitmap(displayId: Int): Bitmap? {
+        if (displayId != Display.DEFAULT_DISPLAY) {
+            val bmp = BackgroundDisplayManager.captureBitmap(displayId)
+            if (bmp != null) return bmp
+        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            MinisAccessibilityService.getInstance()?.captureScreenshot(displayId)?.bitmap
+        } else {
+            null
+        }
+    }
+
+    private fun batchSub(args: OffloadArgs, request: NativeOffloadRequest): NativeOffloadResult {
+        val rawJson = args.positional.getOrNull(1)
+            ?: return NativeOffloadResult(2, "$TOOL batch: missing JSON array argument\n")
+        val jsonArray = try {
+            JSONArray(rawJson)
+        } catch (e: Exception) {
+            return err(args, "INVALID_JSON", "Failed to parse batch JSON: ${e.message}")
+        }
+
+        val stepResults = JSONArray()
+        for (i in 0 until jsonArray.length()) {
+            val item = jsonArray.optJSONObject(i) ?: continue
+            val optional = item.optBoolean("optional", false)
+            val sleepMs = item.optLong("sleepMs", 0L)
+            val cmdString = item.optString("cmd", "")
+            val argvList = if (cmdString.isNotEmpty()) {
+                listOf(TOOL) + cmdString.trim().split("\\s+".toRegex())
+            } else {
+                val jsonArgv = item.optJSONArray("args")
+                if (jsonArgv != null) {
+                    val list = mutableListOf(TOOL)
+                    for (j in 0 until jsonArgv.length()) list.add(jsonArgv.getString(j))
+                    list
+                } else {
+                    continue
+                }
+            }
+
+            val stepReq = NativeOffloadRequest(
+                pid = request.pid,
+                argv = argvList,
+                env = request.env,
+                cwd = request.cwd,
+                sessionId = request.sessionId,
+            )
+
+            val stepRes = handle(stepReq)
+            val stepObj = JSONObject()
+                .put("step", i)
+                .put("argv", JSONArray(argvList))
+                .put("exitCode", stepRes.exitCode)
+                .put("output", stepRes.output.trim())
+            stepResults.put(stepObj)
+
+            if (stepRes.exitCode != 0 && !optional) {
+                return ok(args, JSONObject()
+                    .put("status", "failed")
+                    .put("failedStep", i)
+                    .put("completedSteps", stepResults))
+            }
+
+            if (sleepMs > 0) {
+                try { Thread.sleep(sleepMs) } catch (_: InterruptedException) {}
+            }
+        }
+
+        return ok(args, JSONObject().put("status", "ok").put("steps", stepResults))
+    }
+
     private fun uiSub(args: OffloadArgs, sessionId: String?): NativeOffloadResult {
         return when (args.positional.getOrNull(1)) {
             null         -> NativeOffloadResult(2, UI_HELP)
             "dump"       -> uiDump(args)
+            "ocr"        -> uiOcr(args)
             "find"       -> uiFind(args)
             "info"       -> uiInfo(args)
             "node"       -> uiNode(args)
@@ -375,17 +449,63 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         }
     }
 
+    private fun uiOcr(args: OffloadArgs): NativeOffloadResult {
+        val displayId = resolveTargetDisplayId(args)
+        val bmp = captureTargetBitmap(displayId)
+            ?: return err(args, "CAPTURE_FAILED", "Failed to capture screen bitmap on display $displayId")
+        val query = args.get("text")
+        val blocks = if (!query.isNullOrEmpty()) {
+            LocalScreenOcr.findMatching(bmp, query, contains = true)
+        } else {
+            LocalScreenOcr.recognize(bmp)
+        }
+        val arr = JSONArray()
+        for (b in blocks) {
+            arr.put(JSONObject()
+                .put("text", b.text)
+                .put("center", JSONObject().put("x", b.centerX).put("y", b.centerY))
+                .put("bounds", JSONObject()
+                    .put("left", b.bounds.left).put("top", b.bounds.top)
+                    .put("right", b.bounds.right).put("bottom", b.bounds.bottom)))
+        }
+        return ok(args, JSONObject().put("displayId", displayId).put("count", arr.length()).put("blocks", arr))
+    }
+
     private fun uiDump(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
         val displayId = resolveTargetDisplayId(args)
         val maxDepth = args.getInt("depth") ?: 10
         val compact = args.hasFlag("compact")
         val visibleOnly = args.getBool("visible-only") ?: true
+        val roots = svc.rootNodes(displayId)
         val arr = JSONArray()
-        for (root in svc.rootNodes(displayId)) {
+        for (root in roots) {
             walkNode(svc.nodeRegistry, root, 0, maxDepth, visibleOnly, compact, arr)
         }
-        return ok(args, JSONObject().put("displayId", displayId).put("count", arr.length()).put("nodes", arr))
+        val quality = LocalScreenOcr.assessTreeQuality(roots)
+        val resJson = JSONObject()
+            .put("displayId", displayId)
+            .put("count", arr.length())
+            .put("treeQuality", quality)
+            .put("nodes", arr)
+
+        if (args.hasFlag("ocr") || quality == "UNUSABLE") {
+            val bmp = captureTargetBitmap(displayId)
+            if (bmp != null) {
+                val ocrBlocks = LocalScreenOcr.recognize(bmp)
+                val ocrArr = JSONArray()
+                for (b in ocrBlocks) {
+                    ocrArr.put(JSONObject()
+                        .put("text", b.text)
+                        .put("center", JSONObject().put("x", b.centerX).put("y", b.centerY))
+                        .put("bounds", JSONObject()
+                            .put("left", b.bounds.left).put("top", b.bounds.top)
+                            .put("right", b.bounds.right).put("bottom", b.bounds.bottom)))
+                }
+                resJson.put("ocrBlocks", ocrArr)
+            }
+        }
+        return ok(args, resJson)
     }
 
     private fun walkNode(
@@ -702,17 +822,49 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             ?: return NativeOffloadResult(2, "$TOOL tap text: missing <text>\n")
         val contains = args.hasFlag("contains")
         val index = args.getInt("index") ?: 0
-        val matches = ArrayList<AccessibilityNodeInfo>()
-        for (root in svc.rootNodes(displayId)) findByTextOrDesc(root, text, contains, 30, 0, matches)
-        val n = matches.getOrNull(index)
-            ?: return err(args, "NODE_NOT_FOUND",
-                "no node with text${if (contains) " containing " else "="}\"$text\" (matches: ${matches.size})")
-        if (n.isClickable) n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        else {
-            val r = Rect(); n.getBoundsInScreen(r)
-            tapXYRaw(svc, r.centerX(), r.centerY(), args)
+        val forceOcr = args.hasFlag("ocr")
+        val candidates = text.split('|').map { it.trim() }.filter { it.isNotEmpty() }
+
+        var matchedNode: AccessibilityNodeInfo? = null
+        var matchedText = ""
+        if (!forceOcr) {
+            for (cand in candidates) {
+                val matches = ArrayList<AccessibilityNodeInfo>()
+                for (root in svc.rootNodes(displayId)) findByTextOrDesc(root, cand, contains, 30, 0, matches)
+                val n = matches.getOrNull(index)
+                if (n != null) {
+                    matchedNode = n
+                    matchedText = cand
+                    break
+                }
+            }
         }
-        return ok(args, JSONObject().put("displayId", displayId).put("text", text).put("action", "click"))
+
+        if (matchedNode != null) {
+            if (matchedNode.isClickable) matchedNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            else {
+                val r = Rect(); matchedNode.getBoundsInScreen(r)
+                tapXYRaw(svc, r.centerX(), r.centerY(), args)
+            }
+            return ok(args, JSONObject().put("displayId", displayId).put("text", matchedText).put("action", "click"))
+        }
+
+        val bmp = captureTargetBitmap(displayId)
+        if (bmp != null) {
+            val ocrMatches = LocalScreenOcr.findMatching(bmp, text, contains = true)
+            val hit = ocrMatches.getOrNull(index)
+            if (hit != null) {
+                tapXYRaw(svc, hit.centerX, hit.centerY, args)
+                return ok(args, JSONObject()
+                    .put("displayId", displayId)
+                    .put("text", hit.text)
+                    .put("via", "ocr")
+                    .put("center", JSONObject().put("x", hit.centerX).put("y", hit.centerY))
+                    .put("action", "click"))
+            }
+        }
+
+        return err(args, "NODE_NOT_FOUND", "no node or OCR match with text \"$text\"")
     }
 
     private fun findByTextOrDesc(
@@ -767,17 +919,24 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 
     private fun inputText(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
+        val displayId = resolveTargetDisplayId(args)
         val text = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL input text: missing <text>\n")
         val node = resolveTargetEditable(svc, args)
-            ?: return err(args, "NODE_NOT_FOUND", "no editable focus and no --node specified")
         val finalText = when {
             args.hasFlag("clear")  -> text
-            args.hasFlag("append") -> (node.text?.toString() ?: "") + text
+            args.hasFlag("append") -> (node?.text?.toString() ?: "") + text
             else                   -> text
         }
-        return if (svc.setNodeText(node, finalText))
-            ok(args, JSONObject().put("text", finalText).put("action", "setText"))
+        if (node != null && svc.setNodeText(node, finalText)) {
+            return ok(args, JSONObject().put("displayId", displayId).put("text", finalText).put("action", "setText"))
+        }
+        if (displayId != Display.DEFAULT_DISPLAY && displayId == BackgroundDisplayManager.activeDisplayId) {
+            if (BackgroundDisplayManager.pasteText(displayId, finalText)) {
+                return ok(args, JSONObject().put("displayId", displayId).put("text", finalText).put("action", "pasteText"))
+            }
+        }
+        return if (node == null) err(args, "NODE_NOT_FOUND", "no editable focus and no --node specified")
         else err(args, "ACTION_FAILED", "ACTION_SET_TEXT failed (node may not be editable)")
     }
 

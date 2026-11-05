@@ -90,6 +90,13 @@ import com.openminis.app.agent.jobs.HelperRunner
 import com.openminis.app.debug.HeadlessChatRunner
 import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.DisplayBitmapLimits
+import android.view.KeyEvent
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import com.openminis.app.virtualdisplay.BackgroundDisplayManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 import com.openminis.app.ui.components.DecorativeSpinner
@@ -866,6 +873,128 @@ internal fun AgentDetailCard(
         if (body != null) {
             HorizontalDivider(color = stroke)
             Box(modifier = Modifier.fillMaxWidth().padding(12.dp)) { body() }
+        }
+    }
+}
+
+@Composable
+internal fun BackgroundDisplayLiveTouchCard(
+    modifier: Modifier = Modifier,
+    iconTint: Color = ChatColors.secondaryText,
+) {
+    val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+    if (bgLiveBmp == null) return
+
+    val bgTitle = if (bgIsLive) {
+        "后台虚拟屏直播 (Display #${BackgroundDisplayManager.activeDisplayId})"
+    } else {
+        "后台虚拟屏画面 (${BackgroundDisplayManager.currentPackageName.ifEmpty { "已结束" }})"
+    }
+
+    AgentDetailCard(title = bgTitle, icon = toolIconFor("read_image"), iconTint = iconTint) {
+        Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            var containerSize by remember { mutableStateOf(IntSize.Zero) }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF0F0F12))
+                    .onSizeChanged { containerSize = it }
+                    .pointerInput(bgIsLive, bgLiveBmp) {
+                        if (bgIsLive && bgLiveBmp != null) {
+                            detectTapGestures { offset ->
+                                val cW = containerSize.width
+                                val cH = containerSize.height
+                                val bW = bgLiveBmp.width
+                                val bH = bgLiveBmp.height
+                                if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
+                                    val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
+                                    val rW = bW * scale
+                                    val rH = bH * scale
+                                    val left = (cW - rW) / 2f
+                                    val top = (cH - rH) / 2f
+                                    val relX = offset.x - left
+                                    val relY = offset.y - top
+                                    if (relX in 0f..rW && relY in 0f..rH) {
+                                        val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
+                                        val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
+                                        val realX = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
+                                        val realY = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
+                                        CoroutineScope(Dispatchers.IO).launch {
+                                            BackgroundDisplayManager.tap(x = realX, y = realY)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Image(
+                    bitmap = bgLiveBmp.asImageBitmap(),
+                    contentDescription = "Background Display Preview",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                )
+            }
+
+            if (bgIsLive) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF26262B))
+                            .clickable {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.key(keyCode = KeyEvent.KEYCODE_BACK)
+                                }
+                            }
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("返回 (Back)", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF26262B))
+                            .clickable {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.swipe(x1 = 540, y1 = 1800, x2 = 540, y2 = 400, durationMs = 250)
+                                }
+                            }
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("上滑 (Swipe Up)", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF381E20))
+                            .clickable {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.stopSession(killPackages = false)
+                                }
+                            }
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("关闭后台屏 (Stop)", fontSize = 12.sp, color = Color(0xFFFF6B6B), fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
         }
     }
 }

@@ -371,6 +371,18 @@ object BackgroundDisplayManager {
         return res.exitCode == 0
     }
 
+    fun pasteText(displayId: Int = activeDisplayId, text: String): Boolean {
+        if (displayId < 0 || text.isEmpty()) return false
+        val svc = displayService ?: return false
+        return runCatching { svc.pasteText(displayId, text) }.getOrDefault(false)
+    }
+
+    fun pullBackSpilledTasks(displayId: Int = activeDisplayId): Int {
+        if (displayId < 0 || currentPackageName.isBlank()) return 0
+        val svc = displayService ?: return 0
+        return runCatching { svc.pullBackSpilledTasks(displayId, currentPackageName) }.getOrDefault(0)
+    }
+
     fun status(): JSONObject {
         val svc = displayService
         val bound = svc != null && svc.asBinder()?.isBinderAlive == true

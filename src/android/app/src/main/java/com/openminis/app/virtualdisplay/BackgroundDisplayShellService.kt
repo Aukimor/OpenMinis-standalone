@@ -5,15 +5,18 @@ import android.app.ActivityOptions
 import android.app.Application
 import android.app.Instrumentation
 import android.content.AttributionSource
+import android.content.ClipData
 import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.os.Build
 import android.os.IBinder
+import android.os.PersistableBundle
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
@@ -31,13 +34,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.hypot
+import kotlin.math.roundToInt
+import kotlin.random.Random
 import kotlin.system.exitProcess
 
 /**
- * Privileged Shizuku UserService (UID 2000 / shell) ported from Mika's ShellService & ShellContext.
- * Creates an isolated background VirtualDisplay, keeps its DisplayGroup awake,
- * launches target apps onto it without stealing top focus on Android 14+,
- * injects touch/key events directed at that displayId, and mutes target app audio.
+ * Privileged Shizuku UserService (UID 2000 / shell) ported from Mika's
+ * ShellService, ShellContext, GesturePacing, ShellClipboard, MainScreenSpill,
+ * and DisplayOrientationWatch.
  */
 @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
 class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
@@ -45,6 +50,7 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
     private val context: Context
     private val displays = HashMap<Int, VirtualDisplay>()
     private val mutedPackages = ConcurrentHashMap<String, String>()
+    private val displayTargetPackages = ConcurrentHashMap<Int, String>()
 
     constructor() {
         this.context = createShellContext()
@@ -52,9 +58,6 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
 
     @Keep
     constructor(@Suppress("UNUSED_PARAMETER") hostContext: Context) {
-        // Always wrap the system context as com.android.shell (UID 2000) so
-        // DisplayManager.createVirtualDisplay passes the "packageName must
-        // match the calling uid" check inside IDisplayManager.
         this.context = createShellContext()
     }
 
@@ -125,18 +128,21 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         setFullscreenWindowingMode(id)
         setDisplayImePolicy(id, 0)
 
-        if (flags and FLAG_OWN_DISPLAY_GROUP != 0) {
-            startAwake(id)
-        }
+        startAwakeAndWatch(id)
         return id
     }
 
-    private fun startAwake(displayId: Int) {
+    private fun startAwakeAndWatch(displayId: Int) {
         synchronized(awakeTasks) {
             awakeTasks[displayId]?.cancel(false)
             val future = awakeExecutor.scheduleWithFixedDelay({
                 pokeDisplay(displayId)
-            }, 0, 4_000L, TimeUnit.MILLISECONDS)
+                syncDisplayOrientation(displayId)
+                val pkg = displayTargetPackages[displayId]
+                if (!pkg.isNullOrEmpty()) {
+                    pullBackSpilledTasks(displayId, pkg)
+                }
+            }, 0, 2_000L, TimeUnit.MILLISECONDS)
             awakeTasks[displayId] = future
         }
     }
@@ -145,6 +151,7 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         synchronized(awakeTasks) {
             awakeTasks.remove(displayId)?.cancel(false)
         }
+        displayTargetPackages.remove(displayId)
     }
 
     private fun pokeDisplay(displayId: Int): Boolean {
@@ -158,6 +165,31 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         }
     }
 
+    /**
+     * Ported from Mika's DisplayOrientationWatch: syncs virtual display rotation
+     * when the top activity on [displayId] requests landscape/portrait.
+     */
+    private fun syncDisplayOrientation(displayId: Int) {
+        runCatching {
+            val top = tasksOn(displayId).firstOrNull() ?: return
+            val topComp = TASK_INFO.getField("topActivity").get(top) as? ComponentName ?: return
+            val actInfo = context.packageManager.getActivityInfo(topComp, 0)
+            val o = actInfo.screenOrientation
+            val wantLandscape = o == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+                o == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE ||
+                o == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
+                o == ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+            val rotation = if (wantLandscape) Surface.ROTATION_90 else Surface.ROTATION_0
+            val wm = Class.forName("android.view.WindowManagerGlobal")
+                .getMethod("getWindowManagerService").invoke(null) ?: return
+            wm.javaClass.getMethod(
+                "freezeDisplayRotation",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+            ).invoke(wm, displayId, rotation)
+        }
+    }
+
     override fun releaseDisplay(displayId: Int) {
         stopAwake(displayId)
         val vd = synchronized(displays) { displays.remove(displayId) }
@@ -166,6 +198,7 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
 
     override fun startApp(displayId: Int, packageName: String, userId: Int, force: Boolean): Int {
         if (!ownDisplay(displayId)) return 3
+        displayTargetPackages[displayId] = packageName
         if (force) {
             val user = if (userId < 0) "current" else "$userId"
             exec("am", "force-stop", "--user", user, packageName)
@@ -229,26 +262,42 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         exec("am", "display", "move-stack", "$taskId", "$displayId") == 0
     }
 
+    /**
+     * Ported from Mika's GesturePacing: adds triangular-distribution micro-jitter
+     * and natural press duration (55..110ms) to avoid anti-bot detection.
+     */
     override fun injectTap(displayId: Int, x: Int, y: Int): Boolean {
+        val jitterX = (Random.nextInt(-4, 5) + Random.nextInt(-4, 5)).coerceIn(-8, 8)
+        val jitterY = (Random.nextInt(-4, 5) + Random.nextInt(-4, 5)).coerceIn(-8, 8)
+        val targetX = (x + jitterX).coerceAtLeast(1).toFloat()
+        val targetY = (y + jitterY).coerceAtLeast(1).toFloat()
+        val holdMs = Random.nextLong(55L, 110L)
+
         val now = SystemClock.uptimeMillis()
-        val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x.toFloat(), y.toFloat(), 0).apply {
+        val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, targetX, targetY, 0).apply {
             source = InputDevice.SOURCE_TOUCHSCREEN
         }
-        val up = MotionEvent.obtain(now, now + 50L, MotionEvent.ACTION_UP, x.toFloat(), y.toFloat(), 0).apply {
+        if (!inject(down, displayId)) {
+            down.recycle()
+            return exec("input", "-d", "$displayId", "tap", "${targetX.roundToInt()}", "${targetY.roundToInt()}") == 0
+        }
+        down.recycle()
+        SystemClock.sleep(holdMs)
+        val upTime = SystemClock.uptimeMillis()
+        val up = MotionEvent.obtain(now, upTime, MotionEvent.ACTION_UP, targetX, targetY, 0).apply {
             source = InputDevice.SOURCE_TOUCHSCREEN
         }
         return try {
-            if (!inject(down, displayId)) {
-                exec("input", "-d", "$displayId", "tap", "$x", "$y") == 0
-            } else {
-                inject(up, displayId) || inject(up, displayId)
-            }
+            inject(up, displayId) || inject(up, displayId)
         } finally {
-            down.recycle()
             up.recycle()
         }
     }
 
+    /**
+     * Ported from Mika's GesturePacing: quadratic Bezier micro-bow + ease-in-out
+     * velocity profile for human-like swipes.
+     */
     override fun injectSwipe(
         displayId: Int,
         x1: Int,
@@ -258,7 +307,18 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         durationMs: Int,
     ): Boolean {
         val duration = durationMs.coerceAtLeast(100).toLong()
-        val steps = (duration / 16).toInt().coerceIn(5, 100)
+        val steps = (duration / 12).toInt().coerceIn(8, 90)
+        val dx = (x2 - x1).toFloat()
+        val dy = (y2 - y1).toFloat()
+        val dist = hypot(dx, dy).coerceAtLeast(1f)
+        // Normal vector for a subtle quadratic Bezier bow (~5% of distance)
+        val bowSign = if (Random.nextBoolean()) 1f else -1f
+        val bowMag = (dist * 0.05f).coerceAtMost(28f) * bowSign
+        val nx = -dy / dist
+        val ny = dx / dist
+        val ctrlX = (x1 + x2) * 0.5f + nx * bowMag
+        val ctrlY = (y1 + y2) * 0.5f + ny * bowMag
+
         val now = SystemClock.uptimeMillis()
         val down = MotionEvent.obtain(now, now, MotionEvent.ACTION_DOWN, x1.toFloat(), y1.toFloat(), 0).apply {
             source = InputDevice.SOURCE_TOUCHSCREEN
@@ -273,8 +333,12 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
             val stepTime = now + (duration * i / steps)
             val wait = stepTime - SystemClock.uptimeMillis()
             if (wait > 0) SystemClock.sleep(wait)
-            val currX = x1 + (x2 - x1) * i / steps.toFloat()
-            val currY = y1 + (y2 - y1) * i / steps.toFloat()
+            val linearT = i / steps.toFloat()
+            // Smoothstep ease-in-out
+            val s = linearT * linearT * (3f - 2f * linearT)
+            val oneMinusS = 1f - s
+            val currX = oneMinusS * oneMinusS * x1 + 2f * oneMinusS * s * ctrlX + s * s * x2
+            val currY = oneMinusS * oneMinusS * y1 + 2f * oneMinusS * s * ctrlY + s * s * y2
             val move = MotionEvent.obtain(now, stepTime, MotionEvent.ACTION_MOVE, currX, currY, 0).apply {
                 source = InputDevice.SOURCE_TOUCHSCREEN
             }
@@ -299,6 +363,101 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         } else {
             inject(up, displayId) || inject(up, displayId)
         }
+    }
+
+    /**
+     * Ported from Mika's ShellClipboard + injectCtrlKey: silently writes [text]
+     * to clipboard with overlay-suppression extras, injects Ctrl+V into [displayId],
+     * and restores the user's previous clipboard.
+     */
+    override fun pasteText(displayId: Int, text: String): Boolean {
+        if (!ownDisplay(displayId) || text.isEmpty()) return false
+        val originalClip = getSilentClipboardText()
+        if (!setSilentClipboardText(text)) return false
+        return try {
+            val ok = injectCtrlKey(displayId, KeyEvent.KEYCODE_V)
+            if (originalClip != null) {
+                awakeExecutor.schedule({
+                    setSilentClipboardText(originalClip)
+                }, 250L, TimeUnit.MILLISECONDS)
+            }
+            ok
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun injectCtrlKey(displayId: Int, keyCode: Int): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val meta = KeyEvent.META_CTRL_ON or KeyEvent.META_CTRL_LEFT_ON
+        val ctrlDown = KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_CTRL_LEFT, 0, meta, -1, 0, 0, InputDevice.SOURCE_KEYBOARD)
+        val keyDown = KeyEvent(now, now + 10L, KeyEvent.ACTION_DOWN, keyCode, 0, meta, -1, 0, 0, InputDevice.SOURCE_KEYBOARD)
+        val keyUp = KeyEvent(now, now + 25L, KeyEvent.ACTION_UP, keyCode, 0, meta, -1, 0, 0, InputDevice.SOURCE_KEYBOARD)
+        val ctrlUp = KeyEvent(now, now + 35L, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_CTRL_LEFT, 0, 0, -1, 0, 0, InputDevice.SOURCE_KEYBOARD)
+        val ok1 = inject(ctrlDown, displayId)
+        val ok2 = inject(keyDown, displayId)
+        val ok3 = inject(keyUp, displayId)
+        inject(ctrlUp, displayId)
+        return ok1 && ok2 && ok3
+    }
+
+    private fun getSilentClipboardText(): String? = runCatching {
+        val binder = Class.forName("android.os.ServiceManager")
+            .getMethod("getService", String::class.java).invoke(null, "clipboard") as? IBinder ?: return null
+        val clipService = Class.forName("android.content.IClipboard\$Stub")
+            .getMethod("asInterface", IBinder::class.java).invoke(null, binder) ?: return null
+        val m = clipService.javaClass.methods.firstOrNull { it.name == "getPrimaryClip" } ?: return null
+        val clip = when (m.parameterTypes.size) {
+            1 -> m.invoke(clipService, SHELL_PACKAGE)
+            2 -> m.invoke(clipService, SHELL_PACKAGE, 0)
+            3 -> m.invoke(clipService, SHELL_PACKAGE, null, 0)
+            4 -> m.invoke(clipService, SHELL_PACKAGE, null, 0, 0)
+            else -> null
+        } as? ClipData
+        clip?.getItemAt(0)?.text?.toString()
+    }.getOrNull()
+
+    private fun setSilentClipboardText(text: String): Boolean = runCatching {
+        val binder = Class.forName("android.os.ServiceManager")
+            .getMethod("getService", String::class.java).invoke(null, "clipboard") as? IBinder ?: return false
+        val clipService = Class.forName("android.content.IClipboard\$Stub")
+            .getMethod("asInterface", IBinder::class.java).invoke(null, binder) ?: return false
+        val clip = ClipData.newPlainText("minis", text)
+        clip.description.extras = PersistableBundle().apply {
+            putBoolean("android.content.extra.IS_SENSITIVE", true)
+            putBoolean("com.android.systemui.SUPPRESS_CLIPBOARD_OVERLAY", true)
+        }
+        val m = clipService.javaClass.methods.firstOrNull { it.name == "setPrimaryClip" } ?: return false
+        when (m.parameterTypes.size) {
+            2 -> m.invoke(clipService, clip, SHELL_PACKAGE)
+            3 -> m.invoke(clipService, clip, SHELL_PACKAGE, 0)
+            4 -> m.invoke(clipService, clip, SHELL_PACKAGE, null, 0)
+            5 -> m.invoke(clipService, clip, SHELL_PACKAGE, null, 0, 0)
+            else -> return false
+        }
+        true
+    }.getOrDefault(false)
+
+    /**
+     * Ported from Mika's MainScreenSpill: checks if any task belonging to [targetPackage]
+     * accidentally spilled onto Display 0 and pulls it back to [displayId].
+     */
+    override fun pullBackSpilledTasks(displayId: Int, targetPackage: String): Int {
+        if (!ownDisplay(displayId) || targetPackage.isBlank()) return 0
+        var pulled = 0
+        runCatching {
+            val mainTasks = tasksOn(Display.DEFAULT_DISPLAY)
+            for (t in mainTasks.take(2)) {
+                val topComp = TASK_INFO.getField("topActivity").get(t) as? ComponentName ?: continue
+                if (topComp.packageName == targetPackage) {
+                    val taskId = TASK_INFO.getField("taskId").getInt(t)
+                    if (taskId >= 0 && moveTaskToDisplay(taskId, displayId)) {
+                        pulled++
+                    }
+                }
+            }
+        }
+        return pulled
     }
 
     override fun setAudioMuted(packageName: String, muted: Boolean): Boolean = synchronized(mutedPackages) {
@@ -338,6 +497,7 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
             awakeTasks.values.forEach { it.cancel(false) }
             awakeTasks.clear()
         }
+        displayTargetPackages.clear()
         val allDisplays = synchronized(displays) {
             val copy = displays.values.toList()
             displays.clear()
@@ -351,7 +511,6 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         exitProcess(0)
     }
 
-    @SuppressLint("PrivateApi")
     private fun setFullscreenWindowingMode(displayId: Int) {
         runCatching {
             val wm = Class.forName("android.view.WindowManagerGlobal")
@@ -366,7 +525,6 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         }
     }
 
-    @SuppressLint("PrivateApi")
     private fun setDisplayImePolicy(displayId: Int, policy: Int) {
         runCatching {
             val wm = Class.forName("android.view.WindowManagerGlobal")
@@ -379,7 +537,6 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         }
     }
 
-    @SuppressLint("PrivateApi")
     private fun inject(event: InputEvent, displayId: Int): Boolean = try {
         event.javaClass.getMethod("setDisplayId", Int::class.javaPrimitiveType).invoke(event, displayId)
         val manager = inputManager()
@@ -393,7 +550,6 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         false
     }
 
-    @SuppressLint("PrivateApi")
     private fun inputManager(): Any = runCatching {
         Class.forName("android.hardware.input.InputManagerGlobal").getMethod("getInstance").invoke(null)
     }.getOrNull() ?: Class.forName("android.hardware.input.InputManager").getMethod("getInstance").invoke(null)!!
