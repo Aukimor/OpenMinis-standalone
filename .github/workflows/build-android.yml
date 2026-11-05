@@ -135,8 +135,10 @@ jobs:
           cp "$RELEASE_APK" release-apks/MinisApp-1.16.1-build42-arm64-v8a.apk
           cp "$DEBUG_APK" release-apks/MinisApp-1.16.1-build42-arm64-v8a-debug.apk
 
-          echo "Verifying APK signature matches repository minis-signing.keystore..."
-          keytool -printcert -jarfile release-apks/MinisApp-1.16.1-build42-arm64-v8a.apk | grep -i "ED:BE:53:CE:10:9C:05:25:46:78:EB:17:09:3F:91:9E:BE:19:B2:69:7B:60:25:1B:1D:3A:A2:41:58:82:F0:57"
+          echo "Verifying APK v2/v3 signature matches repository minis-signing.keystore..."
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --print-certs release-apks/MinisApp-1.16.1-build42-arm64-v8a.apk
+          "$APKSIGNER" verify --print-certs release-apks/MinisApp-1.16.1-build42-arm64-v8a.apk | grep -i "edbe53ce109c05254678eb17093f919ebe19b2697b60251b1d3aa2415882f057"
           ls -lh release-apks/
 
       - name: Upload APK artifacts
