@@ -2,13 +2,19 @@ package com.openminis.app.virtualdisplay
 
 import android.annotation.SuppressLint
 import android.app.ActivityOptions
+import android.app.Application
+import android.app.Instrumentation
+import android.content.AttributionSource
 import android.content.ComponentName
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.os.Build
 import android.os.IBinder
+import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import android.view.Display
@@ -18,6 +24,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import androidx.annotation.Keep
+import androidx.annotation.RequiresApi
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -27,7 +34,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.system.exitProcess
 
 /**
- * Privileged Shizuku UserService (UID 2000 / shell) ported from Mika's ShellService.
+ * Privileged Shizuku UserService (UID 2000 / shell) ported from Mika's ShellService & ShellContext.
  * Creates an isolated background VirtualDisplay, keeps its DisplayGroup awake,
  * launches target apps onto it without stealing top focus on Android 14+,
  * injects touch/key events directed at that displayId, and mutes target app audio.
@@ -44,8 +51,11 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
     }
 
     @Keep
-    constructor(context: Context) {
-        this.context = context
+    constructor(@Suppress("UNUSED_PARAMETER") hostContext: Context) {
+        // Always wrap the system context as com.android.shell (UID 2000) so
+        // DisplayManager.createVirtualDisplay passes the "packageName must
+        // match the calling uid" check inside IDisplayManager.
+        this.context = createShellContext()
     }
 
     private val displayManager: DisplayManager by lazy {
@@ -458,8 +468,45 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
         @SuppressLint("PrivateApi", "DiscouragedPrivateApi")
         private fun createShellContext(): Context {
             val at = Class.forName("android.app.ActivityThread")
-            val thread = at.getMethod("currentActivityThread").invoke(null)
-            return at.getDeclaredMethod("getSystemContext").invoke(thread) as Context
+            val thread = at.getMethod("currentActivityThread").invoke(null) ?: newActivityThread(at)
+            val system = at.getDeclaredMethod("getSystemContext").invoke(thread) as Context
+            val ctx = object : ContextWrapper(system) {
+                override fun getPackageName(): String = SHELL_PACKAGE
+                override fun getOpPackageName(): String = SHELL_PACKAGE
+                @RequiresApi(Build.VERSION_CODES.S)
+                override fun getAttributionSource(): AttributionSource =
+                    AttributionSource.Builder(Process.myUid()).setPackageName(SHELL_PACKAGE).build()
+                override fun getApplicationContext(): Context = this
+            }
+            runCatching {
+                val field = at.getDeclaredField("mInitialApplication").apply { isAccessible = true }
+                if (field.get(thread) == null) {
+                    val app = Instrumentation.newApplication(Application::class.java, ctx)
+                    field.set(thread, app)
+                }
+            }
+            return ctx
+        }
+
+        @SuppressLint("PrivateApi", "DiscouragedPrivateApi", "SoonBlockedPrivateApi")
+        private fun newActivityThread(at: Class<*>): Any {
+            val thread = at.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
+            at.getDeclaredField("sCurrentActivityThread").apply { isAccessible = true }.set(null, thread)
+            at.getDeclaredField("mSystemThread").apply { isAccessible = true }.setBoolean(thread, true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) runCatching {
+                val cc = Class.forName("android.app.ConfigurationController")
+                val internal = Class.forName("android.app.ActivityThreadInternal")
+                val controller = cc.getDeclaredConstructor(internal).apply { isAccessible = true }.newInstance(thread)
+                at.getDeclaredField("mConfigurationController").apply { isAccessible = true }.set(thread, controller)
+            }
+            runCatching {
+                val abd = Class.forName("android.app.ActivityThread\$AppBindData")
+                val data = abd.getDeclaredConstructor().apply { isAccessible = true }.newInstance()
+                abd.getDeclaredField("appInfo").apply { isAccessible = true }
+                    .set(data, ApplicationInfo().apply { packageName = SHELL_PACKAGE })
+                at.getDeclaredField("mBoundApplication").apply { isAccessible = true }.set(thread, data)
+            }
+            return thread
         }
     }
 }

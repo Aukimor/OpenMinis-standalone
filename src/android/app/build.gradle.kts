@@ -36,8 +36,8 @@ android {
         applicationId = "com.openminis.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 41
-        versionName = "1.16"
+        versionCode = 42
+        versionName = "1.16.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -53,7 +53,7 @@ android {
         buildConfigField(
             "String",
             "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT",
-            "\"${customizationValue("ANTHROPIC_OAUTH_IDENTIFIER_PROMPT")}\""
+            "\"${customizationValue("ANTHROPIC_OAUTH_IDENTIFIER_PROMPT").ifEmpty { "You are Claude Code, Anthropic's official CLI for Claude." }}\""
         )
 
         // [T15-channels] In-app update. Every build and every update channel

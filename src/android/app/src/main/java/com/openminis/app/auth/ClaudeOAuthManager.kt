@@ -53,12 +53,7 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
          */
         val ANTHROPIC_OAUTH_IDENTIFIER_PROMPT: String
             get() = BuildConfig.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT.ifEmpty {
-                throw IllegalStateException(
-                    "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT is not configured. Copy "
-                        + "app/provider-customization.properties.example to "
-                        + "app/provider-customization.properties and set "
-                        + "ANTHROPIC_OAUTH_IDENTIFIER_PROMPT before using Claude Code OAuth."
-                )
+                "You are Claude Code, Anthropic's official CLI for Claude."
             }
 
         /**
