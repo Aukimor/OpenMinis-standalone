@@ -1755,10 +1755,3 @@ internal fun HelperTranscript(
         }
     }
 }
- FlatChatItem.AssistantLegacyContent -> UsageTapBandRowScope(messageId = item.messageId, inFinalTextBlock = true, isLastRow = true) {
-                    StreamingMarkdownText(content = item.content, isStreaming = item.isStreaming)
-                }
-            }
-        }
-    }
-}
