@@ -490,40 +490,30 @@ internal fun ToolDetailSheet(
                         // sheet may stay open after the run completes (user reading
                         // output), and we don't want a stuck HUD there.
                         val sheetMonitor = rememberSystemResourceMonitor(active = isLive)
-                        // BoxWithConstraints lets us mirror the iOS GeometryReader
-                        // computation `cardWidth = width - 24; cardMinHeight =
-                        // cardWidth * 3/4` so the terminal card stays at a 4:3
-                        // floor when output is short (ToolLiveSheet.swift L1490).
-                        BoxWithConstraints(
+                        val (bgBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+                        val showBgCardInShell = bgBmp != null && (
+                            bgIsLive ||
+                            block.toolArgs.contains("android-a11y") ||
+                            block.toolArgs.contains("fast_soda") ||
+                            block.toolArgs.contains("fast_douyin") ||
+                            block.content.contains("displayId")
+                        )
+                        Column(
                             modifier = Modifier
                                 .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
                                 .padding(horizontal = 12.dp)
                                 .padding(top = 12.dp, bottom = 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            // T177 / T179: card grows from a 4:3 floor and
-                            // fills the surrounding weight(1f) Box so the
-                            // footer sits directly beneath it. The outer
-                            // ModalBottomSheet column is already clamped at
-                            // 0.85f viewport, so the card's effective max
-                            // height is automatically the sheet body minus
-                            // header + footer — no separate cardMaxHeight
-                            // cap needed (and a 55%-screen cap was actively
-                            // wrong: it left a ~200dp gray gap between the
-                            // card's bottom edge and the footer Column on
-                            // tall devices, which is the T179 user report).
-                            // Internal verticalScroll takes over once the
-                            // command + output exceed the card height.
-                            val cardMinHeight = maxWidth * 3f / 4f
-                            // T141 ribbon's measured height (vertical 2.5dp +
-                            // 11sp text ≈ 22dp). Reserve enough bottom padding
-                            // inside the scroll content so the last output line
-                            // never slides under the HUD when scrolled to end.
+                            if (showBgCardInShell) {
+                                BackgroundDisplayLiveTouchCard(iconTint = toolAccent)
+                            }
                             val hudReservePadding = if (isLive) 28.dp else 0.dp
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .fillMaxHeight()
-                                    .heightIn(min = cardMinHeight)
+                                    .heightIn(min = if (showBgCardInShell) 180.dp else 280.dp, max = 520.dp)
                                     .clip(RoundedCornerShape(10.dp))
                                     .background(Color.Black)
                                     .border(
