@@ -1320,8 +1320,6 @@ internal fun HelperDetailContent(block: AssistantBlock) {
         }
         // [T-subagent-detail-rich] Its recent tool calls, newest first.
         digest?.takeIf { it.total > 0 }?.let { SubAgentToolTimelineCard(it) }
-        // 2.5 background virtual display interactive live / last snapshot
-        BackgroundDisplayLiveTouchCard(iconTint = accent)
         // 3. latest screenshot
         latestImagePath?.let { path ->
             val bmp = remember(path) { DisplayBitmapLimits.decodeFileBounded(path) }
@@ -1751,6 +1749,13 @@ internal fun HelperTranscript(
                     }
                 }
                 is FlatChatItem.AssistantLegacyContent -> UsageTapBandRowScope(messageId = item.messageId, inFinalTextBlock = true, isLastRow = true) {
+                    StreamingMarkdownText(content = item.content, isStreaming = item.isStreaming)
+                }
+            }
+        }
+    }
+}
+ FlatChatItem.AssistantLegacyContent -> UsageTapBandRowScope(messageId = item.messageId, inFinalTextBlock = true, isLastRow = true) {
                     StreamingMarkdownText(content = item.content, isStreaming = item.isStreaming)
                 }
             }
