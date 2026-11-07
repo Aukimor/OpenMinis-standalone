@@ -1008,6 +1008,11 @@ internal fun rememberBackgroundDisplayLiveSnapshot(
     val activeDisplayId by BackgroundDisplayManager.activeDisplayIdFlow.collectAsState()
     val frameVersion by BackgroundDisplayManager.frameVersionFlow.collectAsState()
     val isLive = activeDisplayId >= 0
+    // 登记「有界面在看预览」：没人看时后台屏不缩放生成缩略图（见 BackgroundDisplayManager.acquirePreviewViewer）。
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        val release = BackgroundDisplayManager.acquirePreviewViewer()
+        onDispose { release() }
+    }
     val snapshot by produceState<android.graphics.Bitmap?>(
         initialValue = BackgroundDisplayManager.getUiPreviewBitmap(),
         activeDisplayId,

@@ -68,6 +68,15 @@ object BackgroundDisplayManager {
     /** 本次后台屏会话里启动过的包（bg start / bg launch），bg stop --kill 时逐个 force-stop。 */
     private val launchedPackages = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
 
+    /** 正在看预览的界面数（聊天里的实时预览卡、接管弹窗）。为 0 时新帧只更新帧版本，不缩放生成缩略图。 */
+    private val previewViewers = PreviewViewerCount()
+
+    /**
+     * 界面开始显示后台屏预览时调用，离开时调用返回的释放函数（可重复调用，只生效一次）。
+     * 没人看时跳过缩放；有人开始看时，[getUiPreviewBitmap] 会从最新一帧立即生成一张，不会空白。
+     */
+    fun acquirePreviewViewer(): () -> Unit = previewViewers.acquire()
+
     private val frameLock = Any()
     private var latestBitmap: Bitmap? = null
     private var lastUiPreviewBitmap: Bitmap? = null
@@ -185,7 +194,13 @@ object BackgroundDisplayManager {
                     bmp.copyPixelsFromBuffer(plane.buffer)
 
                     val now = System.currentTimeMillis()
-                    if (now - lastPreviewUpdateTs >= 150L) {
+                    if (now - lastPreviewUpdateTs >= 150L && !previewViewers.isWatched) {
+                        // 没有界面在看预览：不缩放，只照常更新帧版本（接管弹窗「操作后无新帧」提示等依赖它）。
+                        // 丢掉旧缩略图的引用（不 recycle，界面可能还拿着），下次有人看时从最新一帧现生成。
+                        lastPreviewUpdateTs = now
+                        lastUiPreviewBitmap = null
+                        frameVersionFlow.value = now
+                    } else if (now - lastPreviewUpdateTs >= 150L) {
                         lastPreviewUpdateTs = now
                         val targetW = (imageReader?.width ?: bmp.width).coerceAtMost(bmp.width)
                         val targetH = (imageReader?.height ?: bmp.height).coerceAtMost(bmp.height)
