@@ -34,4 +34,14 @@ class PreviewViewerCountTest {
         b()
         assertEquals(0, c.viewers)
     }
+
+    @Test fun onlyCardsThatShowThePreviewRegister() {
+        val card = com.openminis.app.ProductionSources.read("ui/chat/ChatComposerWidgets.kt")
+        assertTrue(card.contains("rememberBackgroundDisplayLiveSnapshot(watching = wantsBgLivePreview)"))
+        assertFalse("工具卡不能再无条件登记", card.contains("rememberBackgroundDisplayLiveSnapshot()"))
+        val snap = com.openminis.app.ProductionSources.read("ui/chat/ChatMiscViews.kt")
+            .substringAfter("internal fun rememberBackgroundDisplayLiveSnapshot(").substringBefore("\n}\n")
+        assertTrue("前台才算在看", snap.contains("watching && rememberLifecycleAtLeastStarted()"))
+        assertTrue("登记与释放成对", snap.contains("DisposableEffect(viewing)") && snap.contains("onDispose { release?.invoke() }"))
+    }
 }

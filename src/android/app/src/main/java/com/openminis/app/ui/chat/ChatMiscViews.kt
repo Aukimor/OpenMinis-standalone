@@ -1001,23 +1001,37 @@ internal fun rememberBrowserLiveSnapshot(
     return snapshot
 }
 
+/**
+ * 后台屏实时预览。只有 [watching] 为真（这里真的要把预览画出来）且界面至少 STARTED（App 在前台）时，
+ * 才登记「有人在看」并轮询缩略图；否则不登记、不轮询，后台屏新帧也就不缩放（见
+ * BackgroundDisplayManager.acquirePreviewViewer）。登记与释放由 DisposableEffect 成对完成。
+ * 一开始看（或回到前台）时立即从最新一帧取一张，不会空白。
+ */
 @Composable
 internal fun rememberBackgroundDisplayLiveSnapshot(
     intervalMs: Long = 200L,
+    watching: Boolean = true,
 ): Pair<android.graphics.Bitmap?, Boolean> {
     val activeDisplayId by BackgroundDisplayManager.activeDisplayIdFlow.collectAsState()
-    val frameVersion by BackgroundDisplayManager.frameVersionFlow.collectAsState()
     val isLive = activeDisplayId >= 0
-    // 登记「有界面在看预览」：没人看时后台屏不缩放生成缩略图（见 BackgroundDisplayManager.acquirePreviewViewer）。
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        val release = BackgroundDisplayManager.acquirePreviewViewer()
-        onDispose { release() }
+    val viewing = watching && rememberLifecycleAtLeastStarted()
+    // 没人看的卡不跟着每 150ms 的帧版本重组
+    val frameVersion = if (viewing) BackgroundDisplayManager.frameVersionFlow.collectAsState().value else 0L
+    DisposableEffect(viewing) {
+        val release = if (viewing) BackgroundDisplayManager.acquirePreviewViewer() else null
+        onDispose { release?.invoke() }
     }
     val snapshot by produceState<android.graphics.Bitmap?>(
-        initialValue = BackgroundDisplayManager.getUiPreviewBitmap(),
+        initialValue = if (viewing) BackgroundDisplayManager.getUiPreviewBitmap() else null,
         activeDisplayId,
         frameVersion,
+        viewing,
     ) {
+        if (!viewing) {
+            // 不在看：不取图（取图会现缩放）。后台屏已停止时清掉，避免回来时闪一下残留画面。
+            if (!isLive) value = null
+            return@produceState
+        }
         value = BackgroundDisplayManager.getUiPreviewBitmap()
         if (isLive) {
             while (true) {
@@ -1030,6 +1044,23 @@ internal fun rememberBackgroundDisplayLiveSnapshot(
         }
     }
     return Pair(snapshot, isLive)
+}
+
+/** 当前界面的 Lifecycle 是否至少 STARTED（App 退到后台时为 false）。 */
+@Composable
+private fun rememberLifecycleAtLeastStarted(): Boolean {
+    val owner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    val started = remember(owner) {
+        mutableStateOf(owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED))
+    }
+    DisposableEffect(owner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, _ ->
+            started.value = owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
+    }
+    return started.value
 }
 
 /**
