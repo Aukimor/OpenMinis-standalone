@@ -7,6 +7,10 @@ on:
     tags:
       - 'v*'
       - '1.*'
+  # 只构建、不发布：下方「Publish to GitHub Releases」的条件不含 pull_request，PR 上不会发 Release。
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -119,6 +123,22 @@ jobs:
           ./gradlew :app:assembleGithubDebug --no-daemon --max-workers=2
           ./gradlew :app:assembleGithubRelease --no-daemon --max-workers=2
 
+      # 本 PR 新增的单测：失败即判 CI 失败。
+      - name: Unit tests for this PR (PR only, blocking)
+        if: github.event_name == 'pull_request'
+        run: |
+          cd src/android
+          ./gradlew :app:testGithubDebugUnitTest --tests 'com.openminis.app.ui.chat.BackgroundDisplayToolPredicateTest' --tests 'com.openminis.app.ui.chat.BackgroundDisplayTakeoverStateTest' --no-daemon --max-workers=2
+
+      # 全量单测：main 上已有约 28 个与本 PR 无关的失败（依赖 iOS 源码 / 共享向量文件等），
+      # 先只跑出结果供参考，不阻塞 CI。修好这些既有失败后可去掉 continue-on-error。
+      - name: Full unit tests (PR only, informational)
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          cd src/android
+          ./gradlew :app:testGithubDebugUnitTest --no-daemon --max-workers=2
+
       - name: Rename, verify signature, and prepare APK artifacts
         run: |
           mkdir -p release-apks
@@ -132,13 +152,13 @@ jobs:
             DEBUG_APK="src/android/app/build/outputs/apk/debug/app-debug.apk"
           fi
 
-          cp "$RELEASE_APK" release-apks/MinisApp-1.16.5-build46-arm64-v8a.apk
-          cp "$DEBUG_APK" release-apks/MinisApp-1.16.5-build46-arm64-v8a-debug.apk
+          cp "$RELEASE_APK" release-apks/MinisApp-1.16.6-build47-arm64-v8a.apk
+          cp "$DEBUG_APK" release-apks/MinisApp-1.16.6-build47-arm64-v8a-debug.apk
 
           echo "Verifying APK v2/v3 signature matches repository minis-signing.keystore..."
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-          "$APKSIGNER" verify --print-certs release-apks/MinisApp-1.16.5-build46-arm64-v8a.apk
-          "$APKSIGNER" verify --print-certs release-apks/MinisApp-1.16.5-build46-arm64-v8a.apk | grep -i "edbe53ce109c05254678eb17093f919ebe19b2697b60251b1d3aa2415882f057"
+          "$APKSIGNER" verify --print-certs release-apks/MinisApp-1.16.6-build47-arm64-v8a.apk
+          "$APKSIGNER" verify --print-certs release-apks/MinisApp-1.16.6-build47-arm64-v8a.apk | grep -i "edbe53ce109c05254678eb17093f919ebe19b2697b60251b1d3aa2415882f057"
           ls -lh release-apks/
 
       - name: Upload APK artifacts
@@ -152,10 +172,10 @@ jobs:
         if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '1.16.5' }}
-          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Release 1.16.5 (build 46)' }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '1.16.6' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Release 1.16.6 (build 47)' }}
           draft: false
           prerelease: false
           files: |
-            release-apks/MinisApp-1.16.5-build46-arm64-v8a.apk
-            release-apks/MinisApp-1.16.5-build46-arm64-v8a-debug.apk
+            release-apks/MinisApp-1.16.6-build47-arm64-v8a.apk
+            release-apks/MinisApp-1.16.6-build47-arm64-v8a-debug.apk

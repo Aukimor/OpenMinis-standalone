@@ -64,10 +64,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -886,13 +888,171 @@ internal fun AgentDetailCard(
     }
 }
 
+@Volatile private var lastBackgroundDisplayFailureToastAt = 0L
+
+/** 最近一次接管操作（点击 / 滑动 / 按键）送达的时间，记的是发出时刻；见 [backgroundDisplayNoFrameAfterAction]。 */
+private val lastBackgroundDisplayActionAt = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
+/**
+ * 「操作已发出但画面没变化」提示。自己读当前时间并只在有待确认的操作时每 0.5 秒刷新一次，
+ * 不让整个接管弹窗跟着每秒重组。
+ */
+@Composable
+private fun BackgroundDisplayNoFrameAfterActionHint(modifier: Modifier = Modifier) {
+    val lastActionAt by lastBackgroundDisplayActionAt.collectAsState()
+    val lastFrameAt by BackgroundDisplayManager.frameVersionFlow.collectAsState()
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val pending = lastActionAt > 0L && lastActionAt > lastFrameAt
+    LaunchedEffect(lastActionAt, pending) {
+        while (pending) {
+            nowMs = System.currentTimeMillis()
+            delay(500)
+        }
+    }
+    if (!backgroundDisplayNoFrameAfterAction(lastActionAtMs = lastActionAt, lastFrameAtMs = lastFrameAt, nowMs = nowMs)) return
+    Text(
+        text = BACKGROUND_DISPLAY_NO_FRAME_AFTER_ACTION_HINT,
+        fontSize = 11.sp,
+        color = Color.White.copy(alpha = 0.85f),
+        modifier = modifier
+            .padding(8.dp)
+            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
+}
+
+/**
+ * 在 IO 线程把一次接管操作（点击 / 滑动 / 按键）发给后台屏；没送达时弹一条简短提示
+ * （之前失败是静默的，用户只看到「点了没反应」）。提示文字与限流见 [backgroundDisplayActionFailureMessage]。
+ */
+private fun sendBackgroundDisplayAction(context: android.content.Context, action: () -> Boolean) {
+    val appContext = context.applicationContext
+    CoroutineScope(Dispatchers.IO).launch {
+        val sentAt = System.currentTimeMillis()
+        val delivered = runCatching(action).getOrDefault(false)
+        if (delivered) lastBackgroundDisplayActionAt.value = sentAt
+        val message = backgroundDisplayActionFailureMessage(
+            delivered = delivered,
+            stillLive = BackgroundDisplayManager.activeDisplayId >= 0,
+        ) ?: return@launch
+        val now = System.currentTimeMillis()
+        if (!shouldShowBackgroundDisplayFailure(lastBackgroundDisplayFailureToastAt, now)) return@launch
+        lastBackgroundDisplayFailureToastAt = now
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            android.widget.Toast.makeText(appContext, message, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
+/**
+ * 后台虚拟屏预览上的点击 / 滑动转发（预览卡片与全屏接管弹窗共用）。
+ *
+ * 只用 [isLive] 作为 pointerInput 的 key：画面位图约每 0.15s 换一次，如果把它也当 key，
+ * 手势进行到一半就会被重启，导致滑动、点击失灵。位图尺寸、容器尺寸与回调都经
+ * rememberUpdatedState 在手势结束时读取最新值。
+ */
+@Composable
+private fun Modifier.backgroundDisplayTouchInput(
+    isLive: Boolean,
+    frame: android.graphics.Bitmap?,
+    containerSize: () -> IntSize,
+    onTapFeedback: (Offset) -> Unit,
+): Modifier {
+    val latestFrameSize = rememberUpdatedState(
+        if (frame != null && !frame.isRecycled) IntSize(frame.width, frame.height) else IntSize.Zero,
+    )
+    val latestContainerSize = rememberUpdatedState(containerSize)
+    val latestOnTapFeedback = rememberUpdatedState(onTapFeedback)
+    val context = LocalContext.current
+    return pointerInput(isLive) {
+        if (!isLive) return@pointerInput
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val startOffset = down.position
+            val startTime = System.currentTimeMillis()
+            var lastOffset = startOffset
+            down.consume()
+
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (change.pressed) {
+                    lastOffset = change.position
+                    change.consume()
+                } else {
+                    change.consume()
+                    val endTime = System.currentTimeMillis()
+                    val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
+                    val dx = lastOffset.x - startOffset.x
+                    val dy = lastOffset.y - startOffset.y
+                    val distance = kotlin.math.hypot(dx, dy)
+
+                    val container = latestContainerSize.value()
+                    val cW = container.width
+                    val cH = container.height
+                    val bW = latestFrameSize.value.width
+                    val bH = latestFrameSize.value.height
+
+                    if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
+                        val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
+                        val rW = bW * scale
+                        val rH = bH * scale
+                        val left = (cW - rW) / 2f
+                        val top = (cH - rH) / 2f
+
+                        val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
+                        val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
+
+                        fun toReal(offset: Offset): Pair<Int, Int>? {
+                            val relX = offset.x - left
+                            val relY = offset.y - top
+                            if (relX in 0f..rW && relY in 0f..rH) {
+                                val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
+                                val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
+                                return Pair(rx, ry)
+                            }
+                            return null
+                        }
+
+                        if (distance > 20f) {
+                            val p1 = toReal(startOffset)
+                            val p2 = toReal(lastOffset)
+                            if (p1 != null && p2 != null) {
+                                sendBackgroundDisplayAction(context) {
+                                    BackgroundDisplayManager.swipe(
+                                        x1 = p1.first,
+                                        y1 = p1.second,
+                                        x2 = p2.first,
+                                        y2 = p2.second,
+                                        durationMs = durationMs,
+                                    )
+                                }
+                            }
+                        } else {
+                            val p = toReal(startOffset)
+                            if (p != null) {
+                                latestOnTapFeedback.value(startOffset)
+                                sendBackgroundDisplayAction(context) {
+                                    BackgroundDisplayManager.tap(x = p.first, y = p.second)
+                                }
+                            }
+                        }
+                    }
+                    break
+                }
+            }
+        }
+    }
+}
+
 @Composable
 internal fun BackgroundDisplayLiveTouchCard(
     modifier: Modifier = Modifier,
     iconTint: Color = ChatColors.secondaryText,
 ) {
     val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    if (bgLiveBmp == null) return
+    // 后台屏结束后不再展示残留的最后一帧
+    if (!bgIsLive || bgLiveBmp == null) return
 
     val bgTitle = if (bgIsLive) {
         "后台虚拟屏直播 (Display #${BackgroundDisplayManager.activeDisplayId})"
@@ -919,84 +1079,12 @@ internal fun BackgroundDisplayLiveTouchCard(
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xFF0F0F12))
                     .onSizeChanged { containerSize = it }
-                    .pointerInput(bgIsLive, bgLiveBmp) {
-                        if (!bgIsLive || bgLiveBmp == null) return@pointerInput
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            val startOffset = down.position
-                            val startTime = System.currentTimeMillis()
-                            var lastOffset = startOffset
-                            down.consume()
-
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                if (change.pressed) {
-                                    lastOffset = change.position
-                                    change.consume()
-                                } else {
-                                    change.consume()
-                                    val endTime = System.currentTimeMillis()
-                                    val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
-                                    val dx = lastOffset.x - startOffset.x
-                                    val dy = lastOffset.y - startOffset.y
-                                    val distance = kotlin.math.hypot(dx, dy)
-
-                                    val cW = containerSize.width
-                                    val cH = containerSize.height
-                                    val bW = bgLiveBmp.width
-                                    val bH = bgLiveBmp.height
-
-                                    if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
-                                        val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
-                                        val rW = bW * scale
-                                        val rH = bH * scale
-                                        val left = (cW - rW) / 2f
-                                        val top = (cH - rH) / 2f
-
-                                        val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
-                                        val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
-
-                                        fun toReal(offset: Offset): Pair<Int, Int>? {
-                                            val relX = offset.x - left
-                                            val relY = offset.y - top
-                                            if (relX in 0f..rW && relY in 0f..rH) {
-                                                val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
-                                                val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
-                                                return Pair(rx, ry)
-                                            }
-                                            return null
-                                        }
-
-                                        if (distance > 20f) {
-                                            val p1 = toReal(startOffset)
-                                            val p2 = toReal(lastOffset)
-                                            if (p1 != null && p2 != null) {
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    BackgroundDisplayManager.swipe(
-                                                        x1 = p1.first,
-                                                        y1 = p1.second,
-                                                        x2 = p2.first,
-                                                        y2 = p2.second,
-                                                        durationMs = durationMs,
-                                                    )
-                                                }
-                                            }
-                                        } else {
-                                            val p = toReal(startOffset)
-                                            if (p != null) {
-                                                touchFeedback = startOffset
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    BackgroundDisplayManager.tap(x = p.first, y = p.second)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    break
-                                }
-                            }
-                        }
-                    },
+                    .backgroundDisplayTouchInput(
+                        isLive = bgIsLive,
+                        frame = bgLiveBmp,
+                        containerSize = { containerSize },
+                        onTapFeedback = { touchFeedback = it },
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Image(
@@ -1105,7 +1193,9 @@ internal fun BackgroundDisplayLiveTouchCard(
 internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
     val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
     val activeDisplayId = BackgroundDisplayManager.activeDisplayId
-    val currentPkg = BackgroundDisplayManager.currentPackageName
+    val takeoverState = backgroundDisplayTakeoverState(isLive = bgIsLive, hasFrame = bgLiveBmp != null)
+    val controlsEnabled = backgroundDisplayControlsEnabled(takeoverState)
+    val context = LocalContext.current
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1145,11 +1235,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                                 .size(8.dp)
                                 .background(if (bgIsLive) Color(0xFF4ADE80) else Color.Gray, CircleShape),
                         )
-                        val titleText = if (bgIsLive) {
-                            "📱 后台屏幕实时接管 (Display #${activeDisplayId})"
-                        } else {
-                            "📱 后台屏幕画面 (${currentPkg.ifEmpty { "已结束" }})"
-                        }
+                        val titleText = backgroundDisplayTakeoverTitle(takeoverState, activeDisplayId)
                         Text(
                             text = titleText,
                             fontSize = 14.sp,
@@ -1175,6 +1261,14 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                     }
                 }
 
+                // 状态说明：正在接管 / 启动中 / 已停止，以及怎么退出接管。
+                Text(
+                    text = backgroundDisplayTakeoverHint(takeoverState),
+                    fontSize = 11.sp,
+                    color = if (takeoverState == BackgroundDisplayTakeoverState.STOPPED) Color(0xFFFF9F43) else Color.White.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+
                 // Middle: HD Live Screen with Touch & Swipe Control
                 var containerSize by remember { mutableStateOf(IntSize.Zero) }
                 var touchFeedback by remember { mutableStateOf<Offset?>(null) }
@@ -1193,84 +1287,12 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                         .clip(RoundedCornerShape(10.dp))
                         .background(Color(0xFF0A0A0D))
                         .onSizeChanged { containerSize = it }
-                        .pointerInput(bgIsLive, bgLiveBmp) {
-                            if (!bgIsLive || bgLiveBmp == null) return@pointerInput
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val startOffset = down.position
-                                val startTime = System.currentTimeMillis()
-                                var lastOffset = startOffset
-                                down.consume()
-
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (change.pressed) {
-                                        lastOffset = change.position
-                                        change.consume()
-                                    } else {
-                                        change.consume()
-                                        val endTime = System.currentTimeMillis()
-                                        val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
-                                        val dx = lastOffset.x - startOffset.x
-                                        val dy = lastOffset.y - startOffset.y
-                                        val distance = kotlin.math.hypot(dx, dy)
-
-                                        val cW = containerSize.width
-                                        val cH = containerSize.height
-                                        val bW = bgLiveBmp.width
-                                        val bH = bgLiveBmp.height
-
-                                        if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
-                                            val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
-                                            val rW = bW * scale
-                                            val rH = bH * scale
-                                            val left = (cW - rW) / 2f
-                                            val top = (cH - rH) / 2f
-
-                                            val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
-                                            val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
-
-                                            fun toReal(offset: Offset): Pair<Int, Int>? {
-                                                val relX = offset.x - left
-                                                val relY = offset.y - top
-                                                if (relX in 0f..rW && relY in 0f..rH) {
-                                                    val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
-                                                    val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
-                                                    return Pair(rx, ry)
-                                                }
-                                                return null
-                                            }
-
-                                            if (distance > 20f) {
-                                                val p1 = toReal(startOffset)
-                                                val p2 = toReal(lastOffset)
-                                                if (p1 != null && p2 != null) {
-                                                    CoroutineScope(Dispatchers.IO).launch {
-                                                        BackgroundDisplayManager.swipe(
-                                                            x1 = p1.first,
-                                                            y1 = p1.second,
-                                                            x2 = p2.first,
-                                                            y2 = p2.second,
-                                                            durationMs = durationMs,
-                                                        )
-                                                    }
-                                                }
-                                            } else {
-                                                val p = toReal(startOffset)
-                                                if (p != null) {
-                                                    touchFeedback = startOffset
-                                                    CoroutineScope(Dispatchers.IO).launch {
-                                                        BackgroundDisplayManager.tap(x = p.first, y = p.second)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        break
-                                    }
-                                }
-                            }
-                        },
+                        .backgroundDisplayTouchInput(
+                            isLive = bgIsLive,
+                            frame = bgLiveBmp,
+                            containerSize = { containerSize },
+                            onTapFeedback = { touchFeedback = it },
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
                     if (bgLiveBmp != null) {
@@ -1281,7 +1303,12 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
-                        Text("无后台画面", color = Color.Gray, fontSize = 13.sp)
+                        Text(backgroundDisplayTakeoverPlaceholder(takeoverState) ?: "", color = Color.Gray, fontSize = 13.sp)
+                    }
+
+                    // 操作送达后迟迟没有新画面时的提示（不挡操作）；静止页面没人操作时不提示。
+                    if (takeoverState == BackgroundDisplayTakeoverState.LIVE) {
+                        BackgroundDisplayNoFrameAfterActionHint(modifier = Modifier.align(Alignment.BottomCenter))
                     }
 
                     // Transient Touch Feedback Circle
@@ -1297,9 +1324,11 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                 }
 
                 // Bottom Control Buttons Row: ◁ 返回、↑ 上滑视频、↓ 下滑、✕ 停止后台屏
+                // 后台屏停止后按钮变灰且不可点（之前停止后仍可点，但点了没有任何效果）。
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .alpha(if (controlsEnabled) 1f else 0.4f)
                         .padding(top = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1309,8 +1338,8 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
-                            .clickable {
-                                CoroutineScope(Dispatchers.IO).launch {
+                            .clickable(enabled = controlsEnabled) {
+                                sendBackgroundDisplayAction(context) {
                                     BackgroundDisplayManager.key(keyCode = KeyEvent.KEYCODE_BACK)
                                 }
                             }
@@ -1325,8 +1354,8 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
-                            .clickable {
-                                CoroutineScope(Dispatchers.IO).launch {
+                            .clickable(enabled = controlsEnabled) {
+                                sendBackgroundDisplayAction(context) {
                                     val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
                                     val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
                                     BackgroundDisplayManager.swipe(
@@ -1349,8 +1378,8 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
-                            .clickable {
-                                CoroutineScope(Dispatchers.IO).launch {
+                            .clickable(enabled = controlsEnabled) {
+                                sendBackgroundDisplayAction(context) {
                                     val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
                                     val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
                                     BackgroundDisplayManager.swipe(
@@ -1373,7 +1402,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1.1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF3D1B1E))
-                            .clickable {
+                            .clickable(enabled = controlsEnabled) {
                                 CoroutineScope(Dispatchers.IO).launch {
                                     BackgroundDisplayManager.stopSession(killPackages = false)
                                 }
@@ -1695,7 +1724,7 @@ internal fun HelperDetailContent(block: AssistantBlock) {
             }
         }
         val (bgBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-        if (bgBmp != null) {
+        if (bgIsLive && bgBmp != null) {
             BackgroundDisplayLiveTouchCard(iconTint = accent)
         }
         taskArgs?.let { SubAgentTaskCard(it) }

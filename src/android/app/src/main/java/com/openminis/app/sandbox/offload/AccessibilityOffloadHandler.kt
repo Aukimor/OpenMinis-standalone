@@ -422,10 +422,19 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             stepResults.put(stepObj)
 
             if (stepRes.exitCode != 0 && !optional) {
-                return ok(args, JSONObject()
-                    .put("status", "failed")
-                    .put("failedStep", i)
-                    .put("completedSteps", stepResults))
+                // 某一步失败时整体返回非 0，调用方（脚本 / AI）才能据退出码判断失败；
+                // data 内容与以前相同，只是 ok=false 并附上 error。
+                val body = JSONObject()
+                    .put("ok", false)
+                    .put("error", JSONObject()
+                        .put("code", "STEP_FAILED")
+                        .put("message", "batch step $i failed (exit ${stepRes.exitCode})"))
+                    .put("data", JSONObject()
+                        .put("status", "failed")
+                        .put("failedStep", i)
+                        .put("completedSteps", stepResults))
+                    .toString()
+                return NativeOffloadResult(1, OffloadOutput.formatBody(body, args) + "\n")
             }
 
             if (sleepMs > 0) {
@@ -965,6 +974,9 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             if (keyCode != null && BackgroundDisplayManager.key(displayId, keyCode)) {
                 return ok(args, JSONObject().put("displayId", displayId).put("key", keyName.uppercase()))
             }
+            // 目标是后台屏时，失败就直接报错，不再退回到主屏按返回 / Home（那会误操作用户正在用的主屏）。
+            return err(args, "ACTION_FAILED",
+                "key '$keyName' could not be sent to background display $displayId (not falling back to the main screen)")
         }
         return when (keyName.uppercase()) {
             "BACK" -> { svc.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK); ok(args, JSONObject().put("key", "BACK")) }

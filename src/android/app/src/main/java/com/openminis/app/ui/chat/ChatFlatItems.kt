@@ -578,6 +578,25 @@ internal fun floatingToolBarBlocks(messages: List<ChatMessage>): List<AssistantB
         .filter(::isFloatingToolBarBlock)
 
 /**
+ * 本轮（当前运行中、或刚结束的最后一轮）的 [floatingToolBarBlocks]：最后一条**已发出**的 user 角色消息
+ * （用户输入、定时任务提示、子 Agent 回调都会开启新一轮运行）之后的助手回复里的工具块。
+ * 后台屏「最新一张卡」只在本轮里选，不跨到历史轮次。
+ */
+internal fun currentTurnToolBarBlocks(messages: List<ChatMessage>): List<AssistantBlock> {
+    val start = currentTurnStartIndex(messages)
+    return floatingToolBarBlocks(if (start == 0) messages else messages.subList(start, messages.size))
+}
+
+/**
+ * 本轮从哪条消息开始：最后一条已发出的 user 消息之后。排队中的 user 气泡（[ChatMessage.isQueued] /
+ * [ChatMessage.queuedPromptId]，AI 运行中插的一句话，还没注入）不算新一轮——否则用户一插话，
+ * 本轮的后台屏卡就被切出去，丢了实时画面和接管入口。没有已发出的 user 消息时返回 0。
+ * 与 BackgroundTurnOutcome 里「lastSent」的判断一致。
+ */
+internal fun currentTurnStartIndex(messages: List<ChatMessage>): Int =
+    messages.indexOfLast { it.role == "user" && !it.isQueued && it.queuedPromptId == null } + 1
+
+/**
  * [T-android-toolbar-reserve-compaction] Whether [floatingToolBarBlocks] would
  * return anything, without building the list. The chat list's bottom reserve
  * reads this, so the reserve and the bar it clears cannot disagree. It used to

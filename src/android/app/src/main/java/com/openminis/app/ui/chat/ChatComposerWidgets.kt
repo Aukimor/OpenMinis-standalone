@@ -477,7 +477,15 @@ internal fun MicButton(
  * does.
  */
 @Composable
-internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock? {
+internal fun rememberChildLiveToolBlock(
+    childSessionId: String?,
+    /**
+     * true（默认，原行为）：只取子会话最新一轮里「正在运行」的工具块。
+     * false：取最新一轮的最后一个工具块，不管状态——后台屏预览用它判断 Helper 是不是在操作后台屏，
+     * 因为 a11y 命令往往不到 1 秒就结束，只认运行中会一闪而过（见 [helperShowsBackgroundDisplay]）。
+     */
+    activeOnly: Boolean = true,
+): AssistantBlock? {
     if (childSessionId.isNullOrEmpty()) return null
     val vm = remember(childSessionId) {
         runCatching { ChatViewModelStore.existing(childSessionId) }.getOrNull()
@@ -493,18 +501,76 @@ internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock
         // tool on the newest assistant turn; the subset carries exactly that
         // without copying the child's whole history each token.
         val merged = if (streaming.isEmpty()) msgs else streamingOverlaySubset(msgs, streaming)
-        (merged.lastOrNull { it.role == "assistant" }
-            ?: msgs.lastOrNull { it.role == "assistant" })
-            ?.toolBlocks
-            ?.lastOrNull {
-                it.kind == "tool_use" && (
-                    it.toolStatus == ToolBlockStatus.RUNNING ||
-                        it.toolStatus == ToolBlockStatus.STREAMING ||
-                        it.toolStatus == ToolBlockStatus.PENDING
-                    )
-            }
+        pickChildToolBlock(
+            (merged.lastOrNull { it.role == "assistant" } ?: msgs.lastOrNull { it.role == "assistant" })?.toolBlocks,
+            activeOnly,
+        )
     }
 }
+
+/**
+ * 从子会话最新一轮助手消息的工具块里取一个：[activeOnly] 为 true 时取最后一个运行中（RUNNING /
+ * STREAMING / PENDING）的工具块（[rememberChildLiveToolBlock] 原行为），为 false 时取最后一个工具块、不看状态。
+ */
+internal fun pickChildToolBlock(toolBlocks: List<AssistantBlock>?, activeOnly: Boolean): AssistantBlock? =
+    toolBlocks?.lastOrNull {
+        it.kind == "tool_use" && (
+            !activeOnly ||
+                it.toolStatus == ToolBlockStatus.RUNNING ||
+                it.toolStatus == ToolBlockStatus.STREAMING ||
+                it.toolStatus == ToolBlockStatus.PENDING
+            )
+    }
+
+/**
+ * Helper（子 Agent）卡要不要显示后台屏实时画面：Helper 本身还在运行，且子会话最新的工具块（不按状态过滤，
+ * 见 [pickChildToolBlock]）是后台屏工具。无关 Helper（网页调研等）、已结束的 Helper 保持原样。
+ */
+internal fun helperShowsBackgroundDisplay(helperBlock: AssistantBlock, childLatestTool: AssistantBlock?): Boolean =
+    helperBlock.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME &&
+        (
+            helperBlock.toolStatus == ToolBlockStatus.RUNNING ||
+                helperBlock.toolStatus == ToolBlockStatus.STREAMING ||
+                helperBlock.toolStatus == ToolBlockStatus.PENDING
+            ) &&
+        childLatestTool != null && isBackgroundDisplayTool(childLatestTool)
+
+/**
+ * 这条工具是不是在操作后台虚拟屏：shell_execute 且命令里**作为命令**调用了 android-a11y-cli
+ * 或现有的后台屏脚本（fast_soda / fast_douyin）。按命令词边界匹配——只认整词 `android-a11y-cli`
+ * 且后面不接后缀，所以读文档的 `cat android-a11y-cli.md` / `cat android-a11y.md` 不会误判。
+ * 缩略图与工具详情页共用这一个判断。
+ */
+internal fun isBackgroundDisplayTool(block: AssistantBlock): Boolean =
+    block.toolName == "shell_execute" &&
+        BACKGROUND_DISPLAY_COMMAND_REGEX.containsMatchIn(backgroundDisplayCommandOf(block))
+
+/** 取 shell_execute 的 `command` 字段；解析不到就退回原始 toolArgs。 */
+private fun backgroundDisplayCommandOf(block: AssistantBlock): String =
+    try { org.json.JSONObject(block.toolArgs).optString("command", block.toolArgs) } catch (_: Exception) { block.toolArgs }
+
+/**
+ * 命令词边界匹配：`android-a11y-cli` 作为整词（前面是命令分隔、后面不接字母数字/._-，避免命中
+ * `android-a11y-cli.md` 这类文档名）；`fast_soda` / `fast_douyin` 作为脚本名，只允许不带后缀或带
+ * `.sh` / `.py` 后缀，后面同样不能再接字母数字/._-（`cat fast_soda.md`、`fast_soda_notes` 不命中）。
+ * 前缀用 `/` 作命令路径（如 /usr/local/bin/android-a11y-cli）仍能命中。
+ */
+private val BACKGROUND_DISPLAY_COMMAND_REGEX =
+    Regex("""(?<![\w.-])(?:android-a11y-cli|fast_(?:soda|douyin)(?:\.(?:sh|py))?)(?![\w.-])""")
+
+/**
+ * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：[blocks] 里「最新一张」真正操作后台屏
+ * 的工具卡（[isBackgroundDisplayTool]）。调用方传入的是**本轮**工具块（[currentTurnToolBarBlocks]，
+ * 不是整个会话），所以历史轮次的卡不会入选。其他卡和更早的卡保持普通缩略图。
+ * 不要求这张卡正在运行：a11y 命令往往不到 1 秒就结束，只认「运行中」的话预览会一闪而过、接管入口点不到。
+ *
+ * Helper（子 Agent）卡不在这里按工具名入选——否则后台屏开着时，任何更晚的无关 Helper（如网页调研）
+ * 都会被换成后台屏画面、点开变接管弹窗，真正的 a11y 卡反而失去实时画面。Helper 仅当其子会话「当前工具」
+ * 本身就是后台屏工具时才显示预览，这个判断需要读子会话实时状态，放在 [ToolPreviewThumbnail] 里用
+ * [rememberChildLiveToolBlock] 完成。
+ */
+internal fun latestBackgroundDisplayCardId(blocks: List<AssistantBlock>): String? =
+    blocks.lastOrNull { isBackgroundDisplayTool(it) }?.id
 
 /** The generic tool tile: the output tail, or the tool's icon while there is none. */
 @Composable
@@ -553,6 +619,11 @@ private fun ToolPreviewThumbnail(
      */
     punchThroughDepth: Int = 0,
     /**
+     * 这张卡是不是 [latestBackgroundDisplayCardId] 选中的那张：后台屏运行期间它显示实时画面、点击打开接管。
+     * 由调用处根据本轮工具列表（[currentTurnToolBarBlocks]）算出（这里看不到列表）。
+     */
+    isLatestBackgroundDisplayCard: Boolean = false,
+    /**
      * [T-tool-preview-longpress-close] Long-press handler from the mount site.
      * The menu itself lives there, not here: this view renders itself again
      * for a sub agent's inner tool, and a menu inside would nest. Passed down
@@ -574,11 +645,20 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
     val (bgBitmap, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    val showBgLivePreview = bgBitmap != null && block.toolName != "browser_use" && block.toolName != "read_image" && (
-        bgIsLive ||
-        block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME ||
-        (block.toolName == "shell_execute" && (block.toolArgs.contains("android-a11y") || block.toolArgs.contains("bg ") || block.content.contains("android-a11y") || isLive))
-    )
+    // Helper 卡只在自己还在运行、且子会话最新的工具（不看是否运行中）是后台屏工具时才算后台屏卡；
+    // 无关 Helper（网页调研等）保持原样。
+    val helperChildOnBackgroundDisplay =
+        if (bgIsLive && punchThroughDepth == 0 && block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME) {
+            val childId = remember(block.content, block.toolStatus, block.toolTitle) { parseHelperBlock(block).childSessionId }
+            helperShowsBackgroundDisplay(block, rememberChildLiveToolBlock(childId, activeOnly = false))
+        } else {
+            false
+        }
+    // 后台屏运行期间，只有本轮最新一张后台屏工具卡、或子会话正在操作后台屏的 Helper 卡，把缩略图换成实时画面、
+    // 点击打开接管弹窗。其他工具卡（更早的卡、无关 Helper、浏览器 / 读图卡片等）保持原来的缩略图与点击行为；
+    // 后台屏结束后（bgIsLive = false）也不再拿残留的最后一帧来显示。
+    val showBgLivePreview = bgIsLive && bgBitmap != null && punchThroughDepth == 0 &&
+        (isLatestBackgroundDisplayCard || helperChildOnBackgroundDisplay)
 
     val thumbnailShape = RoundedCornerShape(8.dp)
     // [T-android-agent-thumbnail-accent] A sub agent's tile is marked while
@@ -743,12 +823,14 @@ private fun ToolPreviewThumbnail(
                             .background(if (bgIsLive) Color(0xFF4ADE80) else Color(0xFF8E8E93)),
                     )
                     Text(
-                        text = if (bgIsLive) "BG" else "BG · END",
+                        // 运行中提示这张卡可以点开接管（这块只在后台屏运行时显示，END 分支保留原样）
+                        text = if (bgIsLive) "BG · 点按接管" else "BG · END",
                         fontSize = 6.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
                         color = Color.White.copy(alpha = 0.9f),
                         lineHeight = 7.sp,
+                        maxLines = 1,
                     )
                 }
             }
@@ -1108,6 +1190,11 @@ internal fun FloatingToolStatusBar(
     // dueling local-remember sheets, no LaunchedEffect(lastIndex) page
     // jumps when a new tool starts mid-view).
     onOpenDetail: (String) -> Unit = {},
+    /**
+     * 本轮（当前运行中的 turn）的工具块，[toolBlocks] 是整个会话的。后台屏「最新一张卡」
+     * （[latestBackgroundDisplayCardId]）只在这里面选，避免选中历史轮次的卡。默认等于 [toolBlocks]。
+     */
+    currentTurnToolBlocks: List<AssistantBlock> = toolBlocks,
 ) {
     var currentIndex by remember { mutableStateOf(toolBlocks.lastIndex.coerceAtLeast(0)) }
     val lastIndex = toolBlocks.lastIndex
@@ -1358,12 +1445,14 @@ internal fun FloatingToolStatusBar(
                         }
                     }
                 }
+                val latestBgCardId = remember(currentTurnToolBlocks) { latestBackgroundDisplayCardId(currentTurnToolBlocks) }
                 ToolPreviewThumbnail(
                     block = block,
                     toolAccent = toolAccent,
                     onClick = { onOpenCurrentDetail() },
                     fallbackImagePath = fallbackImagePath,
                     onLongClick = { showThumbMenu = true },
+                    isLatestBackgroundDisplayCard = block.id == latestBgCardId,
                 )
                 DropdownMenu(expanded = showThumbMenu, onDismissRequest = { showThumbMenu = false }) {
                     DropdownMenuItem(

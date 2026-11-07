@@ -1,0 +1,125 @@
+package com.openminis.app.ui.chat
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * 后台虚拟屏预览只该出现在「真正操作后台屏」的工具卡上（fix/bg-display 第 2 条）。
+ * 之前后台屏运行时，几乎所有工具卡（含历史消息、普通 shell 命令）缩略图都被换成后台屏画面。
+ */
+class BackgroundDisplayToolPredicateTest {
+    private fun block(name: String, args: String, id: String = "b") =
+        AssistantBlock(id = id, kind = "tool_use", toolName = name, toolArgs = args)
+
+    @Test fun a11yCliShellCommandIsBackgroundDisplayTool() {
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"android-a11y-cli bg start com.example"}""")))
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"android-a11y-cli tap 100 200"}""")))
+        // 现有后台屏脚本也算（与工具详情页同一判断）
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"sh fast_soda.sh"}""")))
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"python3 fast_douyin.py"}""")))
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"./fast_soda --like 3"}""")))
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"bash ~/bin/fast_douyin.sh && echo done"}""")))
+    }
+
+    @Test fun latestBackgroundDisplayCardIsTheNewestBgCard() {
+        val a11yOld = block("shell_execute", """{"command":"android-a11y-cli bg start x"}""", id = "1")
+        val ls = block("shell_execute", """{"command":"ls"}""", id = "2")
+        val a11yNew = block("shell_execute", """{"command":"android-a11y-cli tap 1 2"}""", id = "3")
+        val browser = block("browser_use", """{"action":"screenshot"}""", id = "4")
+        // 已经结束的 a11y 卡只要是最新一张后台屏卡就继续选中，后面的普通卡不影响
+        assertEquals("3", latestBackgroundDisplayCardId(listOf(a11yOld, ls, a11yNew, browser)))
+        assertNull(latestBackgroundDisplayCardId(listOf(ls, browser)))
+    }
+
+    @Test fun a11yCardFollowedByUnrelatedHelperSelectsTheA11yCard() {
+        // a11y 卡后跟一张无关 Helper（如网页调研）：仍选 a11y 卡，Helper 不按工具名入选。
+        // （Helper 只在子会话当前工具是后台屏工具时由缩略图自己判定显示预览。）
+        val a11y = block("shell_execute", """{"command":"android-a11y-cli tap 1 2"}""", id = "1")
+        val helper = block(com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME, """{"title":"网页调研"}""", id = "2")
+        assertEquals("1", latestBackgroundDisplayCardId(listOf(a11y, helper)))
+        assertNull(latestBackgroundDisplayCardId(listOf(helper)))
+    }
+
+    @Test fun ordinaryToolsAreNot() {
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"ls -la"}""")))
+        // 旧判断里的 "bg " 子串会误中普通命令
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat bg notes.txt"}""")))
+        // 读文档不是操作后台屏：按命令词边界匹配，带后缀的名字不命中（旧的子串 "android-a11y" 会误中）
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat android-a11y-cli.md"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat android-a11y.md"}""")))
+        // fast_soda / fast_douyin 也按词边界：读文档、带别的后缀或更长的名字都不算
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat fast_soda.md"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat fast_douyin.txt"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"ls fast_soda_notes"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat my_fast_soda.sh"}""")))
+        assertFalse(isBackgroundDisplayTool(block("browser_use", """{"action":"screenshot"}""")))
+        assertFalse(isBackgroundDisplayTool(block("read_image", """{"path":"/tmp/a.png"}""")))
+        assertFalse(isBackgroundDisplayTool(block("file_read", """{"path":"android-a11y-cli.md"}""")))
+    }
+
+    @Test fun latestCardIsChosenWithinTheCurrentTurnOnly() {
+        // 上一轮有 a11y 卡，本轮只有普通命令：本轮里没有后台屏卡，不跨轮选中历史卡。
+        fun tool(id: String, cmd: String) = AssistantBlock(id = id, kind = "tool_use", toolName = "shell_execute",
+            toolArgs = """{"command":"$cmd"}""", toolStatus = ToolBlockStatus.SUCCESS)
+        val messages = listOf(
+            ChatMessage(id = "u1", role = "user", content = "打开 App"),
+            ChatMessage(id = "a1", role = "assistant", content = "", toolBlocks = listOf(tool("1", "android-a11y-cli tap 1 2"))),
+            ChatMessage(id = "u2", role = "user", content = "看看目录"),
+            ChatMessage(id = "a2", role = "assistant", content = "", toolBlocks = listOf(tool("2", "ls"))),
+        )
+        assertEquals(listOf("2"), currentTurnToolBarBlocks(messages).map { it.id })
+        assertNull(latestBackgroundDisplayCardId(currentTurnToolBarBlocks(messages)))
+        assertEquals("1", latestBackgroundDisplayCardId(floatingToolBarBlocks(messages)))
+    }
+
+    @Test fun queuedUserBubbleDoesNotStartANewTurn() {
+        // AI 运行中用户插一句话（排队气泡）：本轮仍是插话前那一轮，后台屏卡不丢。
+        fun tool(id: String, cmd: String) = AssistantBlock(id = id, kind = "tool_use", toolName = "shell_execute",
+            toolArgs = """{"command":"$cmd"}""", toolStatus = ToolBlockStatus.RUNNING)
+        val messages = listOf(
+            ChatMessage(id = "u1", role = "user", content = "打开 App"),
+            ChatMessage(id = "a1", role = "assistant", content = "", toolBlocks = listOf(tool("1", "android-a11y-cli tap 1 2"))),
+            ChatMessage(id = "q1", role = "user", content = "顺便点一下关注", isQueued = true, queuedPromptId = "p1"),
+        )
+        assertEquals(1, currentTurnStartIndex(messages))
+        assertEquals("1", latestBackgroundDisplayCardId(currentTurnToolBarBlocks(messages)))
+        // 只带 queuedPromptId 也算排队
+        val onlyPromptId = messages.dropLast(1) + ChatMessage(id = "q2", role = "user", content = "x", queuedPromptId = "p2")
+        assertEquals("1", latestBackgroundDisplayCardId(currentTurnToolBarBlocks(onlyPromptId)))
+        // 排队消息被注入（不再排队）后就是新一轮
+        val sent = messages.dropLast(1) + ChatMessage(id = "u2", role = "user", content = "顺便点一下关注")
+        assertEquals(3, currentTurnStartIndex(sent))
+        assertNull(latestBackgroundDisplayCardId(currentTurnToolBarBlocks(sent)))
+        // 没有任何已发出的 user 消息：从头算
+        assertEquals(0, currentTurnStartIndex(listOf(messages[2])))
+    }
+
+    @Test fun helperShowsBackgroundDisplayFromChildLatestToolRegardlessOfItsStatus() {
+        fun shell(id: String, cmd: String, st: ToolBlockStatus) = AssistantBlock(id = id, kind = "tool_use",
+            toolName = "shell_execute", toolArgs = """{"command":"$cmd"}""", toolStatus = st)
+        val helperName = com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME
+        fun helper(st: ToolBlockStatus) = AssistantBlock(id = "h", kind = "tool_use", toolName = helperName, toolArgs = "{}", toolStatus = st)
+        // 子会话的 a11y 命令已经结束（不到 1 秒），中间没有别的工具：仍取到它，不按状态过滤
+        val childTools = listOf(shell("c1", "ls", ToolBlockStatus.SUCCESS), shell("c2", "android-a11y-cli tap 1 2", ToolBlockStatus.SUCCESS))
+        val latest = pickChildToolBlock(childTools, activeOnly = false)
+        assertEquals("c2", latest?.id)
+        assertNull(pickChildToolBlock(childTools, activeOnly = true)) // 原行为不变：只取运行中的
+        assertTrue(helperShowsBackgroundDisplay(helper(ToolBlockStatus.RUNNING), latest))
+        // Helper 已结束：不显示
+        assertFalse(helperShowsBackgroundDisplay(helper(ToolBlockStatus.SUCCESS), latest))
+        // 无关 Helper：子会话最新工具不是后台屏工具
+        val unrelated = pickChildToolBlock(listOf(shell("c3", "curl https://example.com", ToolBlockStatus.RUNNING)), activeOnly = false)
+        assertFalse(helperShowsBackgroundDisplay(helper(ToolBlockStatus.RUNNING), unrelated))
+        // 子会话还没有工具
+        assertFalse(helperShowsBackgroundDisplay(helper(ToolBlockStatus.RUNNING), null))
+        // 不是 Helper 的卡不走这条判断
+        assertFalse(helperShowsBackgroundDisplay(shell("x", "android-a11y-cli tap 1 2", ToolBlockStatus.RUNNING), latest))
+    }
+
+    @Test fun commandByPathStillCounts() {
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"/usr/local/bin/android-a11y-cli bg status"}""")))
+    }
+}

@@ -477,12 +477,47 @@ class BackgroundDisplayShellService : IBackgroundDisplayService.Stub {
 
     override fun settleBehind(displayId: Int) {
         val rows = tasksOn(displayId)
+        if (rows.isEmpty()) return
+        // 先记下主屏当前最前面的任务（用户正在看的界面，通常就是本 App）。
+        // 把后台屏的任务挪到主屏（为了在虚拟屏释放后保住它们）会让它们跑到主屏最前面，
+        // 挪完立刻把原来的任务放回最前，后台 App 就只留在主屏的后台，不打扰用户。
+        val mainFront = tasksOn(Display.DEFAULT_DISPLAY).firstOrNull()
+            ?.let { runCatching { TASK_INFO.getField("taskId").getInt(it) }.getOrDefault(-1) } ?: -1
+        val moved = mutableListOf<Int>()
         for (row in rows) {
             val taskId = runCatching { TASK_INFO.getField("taskId").getInt(row) }.getOrDefault(-1)
-            if (taskId >= 0) {
-                moveTaskToDisplay(taskId, Display.DEFAULT_DISPLAY)
+            if (taskId >= 0 && moveTaskToDisplay(taskId, Display.DEFAULT_DISPLAY)) {
+                moved += taskId
             }
         }
+        if (moved.isNotEmpty() && mainFront >= 0 && mainFront !in moved) {
+            if (!bringTaskToFront(mainFront)) {
+                Log.w(TAG, "settleBehind: could not restore main-display front task $mainFront")
+            }
+        }
+    }
+
+    /** 把指定任务放回所在屏幕的最前面（IActivityTaskManager.moveTaskToFront，需 REORDER_TASKS，shell 有）。 */
+    private fun bringTaskToFront(taskId: Int): Boolean {
+        val viaMoveToFront = runCatching {
+            val m = taskManager.javaClass.methods.first { it.name == "moveTaskToFront" }
+            when (m.parameterTypes.size) {
+                // Android 10+: (IApplicationThread app, String callingPackage, int task, int flags, Bundle options)
+                5 -> m.invoke(taskManager, null, SHELL_PACKAGE, taskId, 0, null)
+                // 更早的签名：(int task, int flags, Bundle options)
+                3 -> m.invoke(taskManager, taskId, 0, null)
+                else -> error("unexpected moveTaskToFront signature")
+            }
+        }
+        if (viaMoveToFront.isSuccess) return true
+        Log.w(TAG, "moveTaskToFront failed, trying startActivityFromRecents", viaMoveToFront.exceptionOrNull())
+        return runCatching {
+            taskManager.javaClass.getMethod(
+                "startActivityFromRecents",
+                Int::class.javaPrimitiveType,
+                android.os.Bundle::class.java,
+            ).invoke(taskManager, taskId, null)
+        }.isSuccess
     }
 
     override fun releaseAll() {
