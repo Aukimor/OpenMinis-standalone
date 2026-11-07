@@ -551,11 +551,12 @@ private fun backgroundDisplayCommandOf(block: AssistantBlock): String =
 
 /**
  * 命令词边界匹配：`android-a11y-cli` 作为整词（前面是命令分隔、后面不接字母数字/._-，避免命中
- * `android-a11y-cli.md` 这类文档名）；`fast_soda` / `fast_douyin` 作为脚本名（允许 .sh/.py 后缀）。
+ * `android-a11y-cli.md` 这类文档名）；`fast_soda` / `fast_douyin` 作为脚本名，只允许不带后缀或带
+ * `.sh` / `.py` 后缀，后面同样不能再接字母数字/._-（`cat fast_soda.md`、`fast_soda_notes` 不命中）。
  * 前缀用 `/` 作命令路径（如 /usr/local/bin/android-a11y-cli）仍能命中。
  */
 private val BACKGROUND_DISPLAY_COMMAND_REGEX =
-    Regex("""(?<![\w.-])(?:android-a11y-cli(?![\w.-])|fast_soda|fast_douyin)""")
+    Regex("""(?<![\w.-])(?:android-a11y-cli|fast_(?:soda|douyin)(?:\.(?:sh|py))?)(?![\w.-])""")
 
 /**
  * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：[blocks] 里「最新一张」真正操作后台屏

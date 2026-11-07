@@ -20,6 +20,8 @@ class BackgroundDisplayToolPredicateTest {
         // 现有后台屏脚本也算（与工具详情页同一判断）
         assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"sh fast_soda.sh"}""")))
         assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"python3 fast_douyin.py"}""")))
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"./fast_soda --like 3"}""")))
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"bash ~/bin/fast_douyin.sh && echo done"}""")))
     }
 
     @Test fun latestBackgroundDisplayCardIsTheNewestBgCard() {
@@ -48,6 +50,11 @@ class BackgroundDisplayToolPredicateTest {
         // 读文档不是操作后台屏：按命令词边界匹配，带后缀的名字不命中（旧的子串 "android-a11y" 会误中）
         assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat android-a11y-cli.md"}""")))
         assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat android-a11y.md"}""")))
+        // fast_soda / fast_douyin 也按词边界：读文档、带别的后缀或更长的名字都不算
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat fast_soda.md"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat fast_douyin.txt"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"ls fast_soda_notes"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat my_fast_soda.sh"}""")))
         assertFalse(isBackgroundDisplayTool(block("browser_use", """{"action":"screenshot"}""")))
         assertFalse(isBackgroundDisplayTool(block("read_image", """{"path":"/tmp/a.png"}""")))
         assertFalse(isBackgroundDisplayTool(block("file_read", """{"path":"android-a11y-cli.md"}""")))
