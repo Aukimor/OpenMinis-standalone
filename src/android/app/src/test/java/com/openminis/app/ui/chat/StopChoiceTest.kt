@@ -184,7 +184,8 @@ class StopChoiceTest {
         val delegate = vm.substringAfter("    private suspend fun executeDelegateTask(")
         assertTrue(delegate.indexOf("val detachSeen = delegateDetach.value") in 0 until delegate.indexOf("// ── Wait mode"))
         assertTrue(delegate.contains("if (userFollowUp || delegateDetach.value != detachSeen) {"))
-        assertTrue(delegate.contains("withTimeoutOrNull(1_000L) { delegateDetach.first { it != detachSeen } }"))
+        // 每拍仍会被分离打断（现在也会被子代理结束打断），见 DelegateWaitTickTest
+        assertTrue(delegate.contains("awaitDelegateWaitTick(1_000L, childVm.isStreaming, delegateDetach, detachSeen)"))
     }
 
     @Test fun `stop all tells the model its timers are gone, after the cleanup's writes`() {
