@@ -7,6 +7,10 @@ on:
     tags:
       - 'v*'
       - '1.*'
+  # 只构建、不发布：下方「Publish to GitHub Releases」的条件不含 pull_request，PR 上不会发 Release。
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
