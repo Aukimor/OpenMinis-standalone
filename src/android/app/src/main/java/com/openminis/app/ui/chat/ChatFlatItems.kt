@@ -578,6 +578,16 @@ internal fun floatingToolBarBlocks(messages: List<ChatMessage>): List<AssistantB
         .filter(::isFloatingToolBarBlock)
 
 /**
+ * 本轮（当前运行中、或刚结束的最后一轮）的 [floatingToolBarBlocks]：最后一条 user 角色消息
+ * （用户输入、定时任务提示、子 Agent 回调都会开启新一轮运行）之后的助手回复里的工具块。
+ * 后台屏「最新一张卡」只在本轮里选，不跨到历史轮次。
+ */
+internal fun currentTurnToolBarBlocks(messages: List<ChatMessage>): List<AssistantBlock> {
+    val start = messages.indexOfLast { it.role == "user" } + 1
+    return floatingToolBarBlocks(if (start == 0) messages else messages.subList(start, messages.size))
+}
+
+/**
  * [T-android-toolbar-reserve-compaction] Whether [floatingToolBarBlocks] would
  * return anything, without building the list. The chat list's bottom reserve
  * reads this, so the reserve and the bar it clears cannot disagree. It used to

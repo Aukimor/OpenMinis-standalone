@@ -53,6 +53,21 @@ class BackgroundDisplayToolPredicateTest {
         assertFalse(isBackgroundDisplayTool(block("file_read", """{"path":"android-a11y-cli.md"}""")))
     }
 
+    @Test fun latestCardIsChosenWithinTheCurrentTurnOnly() {
+        // 上一轮有 a11y 卡，本轮只有普通命令：本轮里没有后台屏卡，不跨轮选中历史卡。
+        fun tool(id: String, cmd: String) = AssistantBlock(id = id, kind = "tool_use", toolName = "shell_execute",
+            toolArgs = """{"command":"$cmd"}""", toolStatus = ToolBlockStatus.SUCCESS)
+        val messages = listOf(
+            ChatMessage(id = "u1", role = "user", content = "打开 App"),
+            ChatMessage(id = "a1", role = "assistant", content = "", toolBlocks = listOf(tool("1", "android-a11y-cli tap 1 2"))),
+            ChatMessage(id = "u2", role = "user", content = "看看目录"),
+            ChatMessage(id = "a2", role = "assistant", content = "", toolBlocks = listOf(tool("2", "ls"))),
+        )
+        assertEquals(listOf("2"), currentTurnToolBarBlocks(messages).map { it.id })
+        assertNull(latestBackgroundDisplayCardId(currentTurnToolBarBlocks(messages)))
+        assertEquals("1", latestBackgroundDisplayCardId(floatingToolBarBlocks(messages)))
+    }
+
     @Test fun commandByPathStillCounts() {
         assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"/usr/local/bin/android-a11y-cli bg status"}""")))
     }

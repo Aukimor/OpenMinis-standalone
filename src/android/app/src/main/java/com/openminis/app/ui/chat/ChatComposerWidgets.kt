@@ -529,8 +529,9 @@ private val BACKGROUND_DISPLAY_COMMAND_REGEX =
     Regex("""(?<![\w.-])(?:android-a11y-cli(?![\w.-])|fast_soda|fast_douyin)""")
 
 /**
- * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：**本轮**工具里「最新一张」真正操作后台屏
- * 的工具卡（[isBackgroundDisplayTool]）。其他卡和更早的卡保持普通缩略图。
+ * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：[blocks] 里「最新一张」真正操作后台屏
+ * 的工具卡（[isBackgroundDisplayTool]）。调用方传入的是**本轮**工具块（[currentTurnToolBarBlocks]，
+ * 不是整个会话），所以历史轮次的卡不会入选。其他卡和更早的卡保持普通缩略图。
  * 不要求这张卡正在运行：a11y 命令往往不到 1 秒就结束，只认「运行中」的话预览会一闪而过、接管入口点不到。
  *
  * Helper（子 Agent）卡不在这里按工具名入选——否则后台屏开着时，任何更晚的无关 Helper（如网页调研）
@@ -589,7 +590,7 @@ private fun ToolPreviewThumbnail(
     punchThroughDepth: Int = 0,
     /**
      * 这张卡是不是 [latestBackgroundDisplayCardId] 选中的那张：后台屏运行期间它显示实时画面、点击打开接管。
-     * 由调用处根据整轮工具列表算出（这里看不到列表）。
+     * 由调用处根据本轮工具列表（[currentTurnToolBarBlocks]）算出（这里看不到列表）。
      */
     isLatestBackgroundDisplayCard: Boolean = false,
     /**
@@ -1156,6 +1157,11 @@ internal fun FloatingToolStatusBar(
     // dueling local-remember sheets, no LaunchedEffect(lastIndex) page
     // jumps when a new tool starts mid-view).
     onOpenDetail: (String) -> Unit = {},
+    /**
+     * 本轮（当前运行中的 turn）的工具块，[toolBlocks] 是整个会话的。后台屏「最新一张卡」
+     * （[latestBackgroundDisplayCardId]）只在这里面选，避免选中历史轮次的卡。默认等于 [toolBlocks]。
+     */
+    currentTurnToolBlocks: List<AssistantBlock> = toolBlocks,
 ) {
     var currentIndex by remember { mutableStateOf(toolBlocks.lastIndex.coerceAtLeast(0)) }
     val lastIndex = toolBlocks.lastIndex
@@ -1406,7 +1412,7 @@ internal fun FloatingToolStatusBar(
                         }
                     }
                 }
-                val latestBgCardId = remember(toolBlocks) { latestBackgroundDisplayCardId(toolBlocks) }
+                val latestBgCardId = remember(currentTurnToolBlocks) { latestBackgroundDisplayCardId(currentTurnToolBlocks) }
                 ToolPreviewThumbnail(
                     block = block,
                     toolAccent = toolAccent,

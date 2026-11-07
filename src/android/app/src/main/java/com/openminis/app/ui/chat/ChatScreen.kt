@@ -5451,14 +5451,19 @@ fun ChatScreen(
                 // never opens (and its sentinel LaunchedEffect immediately
                 // closes the detail state because the id "doesn't exist").
                 var lastToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
+                // 本轮的工具块（后台屏「最新一张卡」只在本轮里选，见 currentTurnToolBarBlocks）。
+                var currentTurnToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
                 LaunchedEffect(messages) {
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream ->
                         val merged = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
-                        floatingToolBarBlocks(merged)
-                    }.collect { lastToolBlocks = it }
+                        floatingToolBarBlocks(merged) to currentTurnToolBarBlocks(merged)
+                    }.collect { (all, turn) ->
+                        lastToolBlocks = all
+                        currentTurnToolBlocks = turn
+                    }
                 }
                 val allToolBlocks = lastToolBlocks
                 // [T-p2-agent-series] The agent block is just another entry of
@@ -5495,6 +5500,7 @@ fun ChatScreen(
                         Column {
                         FloatingToolStatusBar(
                             toolBlocks = lastToolBlocks,
+                            currentTurnToolBlocks = currentTurnToolBlocks,
                             // [T-android-stop-late-write] Same per-tool stop
                             // as the message-list pill, for the shown block.
                             onStop = { blockId -> viewModel.stopTool(blockId) },
