@@ -823,12 +823,14 @@ private fun ToolPreviewThumbnail(
                             .background(if (bgIsLive) Color(0xFF4ADE80) else Color(0xFF8E8E93)),
                     )
                     Text(
-                        text = if (bgIsLive) "BG" else "BG · END",
+                        // 运行中提示这张卡可以点开接管（这块只在后台屏运行时显示，END 分支保留原样）
+                        text = if (bgIsLive) "BG · 点按接管" else "BG · END",
                         fontSize = 6.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
                         color = Color.White.copy(alpha = 0.9f),
                         lineHeight = 7.sp,
+                        maxLines = 1,
                     )
                 }
             }
