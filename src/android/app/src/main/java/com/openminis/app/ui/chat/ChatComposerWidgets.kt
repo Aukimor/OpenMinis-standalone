@@ -690,8 +690,17 @@ private fun ToolPreviewThumbnail(
                 }
             }
             .then(
-                if (onLongClick == null) Modifier.clickable(onClick = onClick)
-                else Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+                run {
+                    val handleThumbnailClick: () -> Unit = {
+                        if (showBgLivePreview && bgBitmap != null) {
+                            com.openminis.app.virtualdisplay.BackgroundDisplayManager.openTakeoverDialog()
+                        } else {
+                            onClick()
+                        }
+                    }
+                    if (onLongClick == null) Modifier.clickable(onClick = handleThumbnailClick)
+                    else Modifier.combinedClickable(onClick = handleThumbnailClick, onLongClick = onLongClick)
+                },
             ),
     ) {
         if (showBgLivePreview && bgBitmap != null) {

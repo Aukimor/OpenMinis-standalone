@@ -1,5 +1,6 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.virtualdisplay.BackgroundDisplayManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -5593,6 +5594,12 @@ fun ChatScreen(
                             onOpenAgentTranscript(childId)
                         },
                     )
+                }
+
+                // Fullscreen background display interactive touch takeover dialog
+                val showBgTakeover by BackgroundDisplayManager.showTakeoverDialogFlow.collectAsState()
+                if (showBgTakeover) {
+                    BackgroundDisplayTakeoverDialog(onDismiss = { BackgroundDisplayManager.closeTakeoverDialog() })
                 }
 
                 // [T-android-scroll-fab-content-inset] Keep the two scroll

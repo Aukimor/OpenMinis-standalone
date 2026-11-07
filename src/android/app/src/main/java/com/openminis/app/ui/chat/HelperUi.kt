@@ -94,6 +94,15 @@ import android.view.KeyEvent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import com.openminis.app.virtualdisplay.BackgroundDisplayManager
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -894,6 +903,14 @@ internal fun BackgroundDisplayLiveTouchCard(
     AgentDetailCard(title = bgTitle, icon = toolIconFor("read_image"), iconTint = iconTint) {
         Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             var containerSize by remember { mutableStateOf(IntSize.Zero) }
+            var touchFeedback by remember { mutableStateOf<Offset?>(null) }
+
+            LaunchedEffect(touchFeedback) {
+                if (touchFeedback != null) {
+                    delay(400)
+                    touchFeedback = null
+                }
+            }
 
             Box(
                 modifier = Modifier
@@ -903,29 +920,79 @@ internal fun BackgroundDisplayLiveTouchCard(
                     .background(Color(0xFF0F0F12))
                     .onSizeChanged { containerSize = it }
                     .pointerInput(bgIsLive, bgLiveBmp) {
-                        if (bgIsLive && bgLiveBmp != null) {
-                            detectTapGestures { offset ->
-                                val cW = containerSize.width
-                                val cH = containerSize.height
-                                val bW = bgLiveBmp.width
-                                val bH = bgLiveBmp.height
-                                if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
-                                    val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
-                                    val rW = bW * scale
-                                    val rH = bH * scale
-                                    val left = (cW - rW) / 2f
-                                    val top = (cH - rH) / 2f
-                                    val relX = offset.x - left
-                                    val relY = offset.y - top
-                                    if (relX in 0f..rW && relY in 0f..rH) {
+                        if (!bgIsLive || bgLiveBmp == null) return@pointerInput
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val startOffset = down.position
+                            val startTime = System.currentTimeMillis()
+                            var lastOffset = startOffset
+                            down.consume()
+
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.pressed) {
+                                    lastOffset = change.position
+                                    change.consume()
+                                } else {
+                                    change.consume()
+                                    val endTime = System.currentTimeMillis()
+                                    val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
+                                    val dx = lastOffset.x - startOffset.x
+                                    val dy = lastOffset.y - startOffset.y
+                                    val distance = kotlin.math.hypot(dx, dy)
+
+                                    val cW = containerSize.width
+                                    val cH = containerSize.height
+                                    val bW = bgLiveBmp.width
+                                    val bH = bgLiveBmp.height
+
+                                    if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
+                                        val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
+                                        val rW = bW * scale
+                                        val rH = bH * scale
+                                        val left = (cW - rW) / 2f
+                                        val top = (cH - rH) / 2f
+
                                         val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
                                         val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
-                                        val realX = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
-                                        val realY = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
-                                        CoroutineScope(Dispatchers.IO).launch {
-                                            BackgroundDisplayManager.tap(x = realX, y = realY)
+
+                                        fun toReal(offset: Offset): Pair<Int, Int>? {
+                                            val relX = offset.x - left
+                                            val relY = offset.y - top
+                                            if (relX in 0f..rW && relY in 0f..rH) {
+                                                val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
+                                                val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
+                                                return Pair(rx, ry)
+                                            }
+                                            return null
+                                        }
+
+                                        if (distance > 20f) {
+                                            val p1 = toReal(startOffset)
+                                            val p2 = toReal(lastOffset)
+                                            if (p1 != null && p2 != null) {
+                                                CoroutineScope(Dispatchers.IO).launch {
+                                                    BackgroundDisplayManager.swipe(
+                                                        x1 = p1.first,
+                                                        y1 = p1.second,
+                                                        x2 = p2.first,
+                                                        y2 = p2.second,
+                                                        durationMs = durationMs,
+                                                    )
+                                                }
+                                            }
+                                        } else {
+                                            val p = toReal(startOffset)
+                                            if (p != null) {
+                                                touchFeedback = startOffset
+                                                CoroutineScope(Dispatchers.IO).launch {
+                                                    BackgroundDisplayManager.tap(x = p.first, y = p.second)
+                                                }
+                                            }
                                         }
                                     }
+                                    break
                                 }
                             }
                         }
@@ -938,6 +1005,33 @@ internal fun BackgroundDisplayLiveTouchCard(
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
                 )
+
+                // Visual tap feedback circle
+                touchFeedback?.let { pos ->
+                    Box(
+                        modifier = Modifier
+                            .offset { IntOffset(pos.x.toInt() - 16, pos.y.toInt() - 16) }
+                            .size(32.dp)
+                            .border(2.dp, Color(0xFF4ADE80), CircleShape)
+                            .background(Color(0xFF4ADE80).copy(alpha = 0.35f), CircleShape),
+                    )
+                }
+            }
+
+            // Quick button to open full-screen takeover dialog
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF382BF0).copy(alpha = 0.22f))
+                    .border(1.dp, Color(0xFF6366F1).copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                    .clickable {
+                        BackgroundDisplayManager.openTakeoverDialog()
+                    }
+                    .padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("🔍 全屏接管操作", fontSize = 13.sp, color = Color(0xFF818CF8), fontWeight = FontWeight.SemiBold)
             }
 
             if (bgIsLive) {
@@ -969,7 +1063,15 @@ internal fun BackgroundDisplayLiveTouchCard(
                             .background(Color(0xFF26262B))
                             .clickable {
                                 CoroutineScope(Dispatchers.IO).launch {
-                                    BackgroundDisplayManager.swipe(x1 = 540, y1 = 1800, x2 = 540, y2 = 400, durationMs = 250)
+                                    val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
+                                    val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
+                                    BackgroundDisplayManager.swipe(
+                                        x1 = vW / 2,
+                                        y1 = (vH * 0.75).toInt(),
+                                        x2 = vW / 2,
+                                        y2 = (vH * 0.2).toInt(),
+                                        durationMs = 250,
+                                    )
                                 }
                             }
                             .padding(vertical = 6.dp),
@@ -992,6 +1094,295 @@ internal fun BackgroundDisplayLiveTouchCard(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text("关闭后台屏 (Stop)", fontSize = 12.sp, color = Color(0xFFFF6B6B), fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
+    val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+    val activeDisplayId = BackgroundDisplayManager.activeDisplayId
+    val currentPkg = BackgroundDisplayManager.currentPackageName
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        val configuration = LocalConfiguration.current
+        val screenWidth = configuration.screenWidthDp.dp
+        val screenHeight = configuration.screenHeightDp.dp
+
+        Box(
+            modifier = Modifier
+                .width(screenWidth * 0.92f)
+                .height(screenHeight * 0.82f)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF141418))
+                .border(1.dp, Color(0xFF33333F), RoundedCornerShape(16.dp))
+                .padding(12.dp),
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // Top Header Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(if (bgIsLive) Color(0xFF4ADE80) else Color.Gray, CircleShape),
+                        )
+                        val titleText = if (bgIsLive) {
+                            "📱 后台屏幕实时接管 (Display #${activeDisplayId})"
+                        } else {
+                            "📱 后台屏幕画面 (${currentPkg.ifEmpty { "已结束" }})"
+                        }
+                        Text(
+                            text = titleText,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF2A2A32))
+                            .clickable(onClick = onDismiss),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+
+                // Middle: HD Live Screen with Touch & Swipe Control
+                var containerSize by remember { mutableStateOf(IntSize.Zero) }
+                var touchFeedback by remember { mutableStateOf<Offset?>(null) }
+
+                LaunchedEffect(touchFeedback) {
+                    if (touchFeedback != null) {
+                        delay(400)
+                        touchFeedback = null
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF0A0A0D))
+                        .onSizeChanged { containerSize = it }
+                        .pointerInput(bgIsLive, bgLiveBmp) {
+                            if (!bgIsLive || bgLiveBmp == null) return@pointerInput
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val startOffset = down.position
+                                val startTime = System.currentTimeMillis()
+                                var lastOffset = startOffset
+                                down.consume()
+
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (change.pressed) {
+                                        lastOffset = change.position
+                                        change.consume()
+                                    } else {
+                                        change.consume()
+                                        val endTime = System.currentTimeMillis()
+                                        val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
+                                        val dx = lastOffset.x - startOffset.x
+                                        val dy = lastOffset.y - startOffset.y
+                                        val distance = kotlin.math.hypot(dx, dy)
+
+                                        val cW = containerSize.width
+                                        val cH = containerSize.height
+                                        val bW = bgLiveBmp.width
+                                        val bH = bgLiveBmp.height
+
+                                        if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
+                                            val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
+                                            val rW = bW * scale
+                                            val rH = bH * scale
+                                            val left = (cW - rW) / 2f
+                                            val top = (cH - rH) / 2f
+
+                                            val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
+                                            val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
+
+                                            fun toReal(offset: Offset): Pair<Int, Int>? {
+                                                val relX = offset.x - left
+                                                val relY = offset.y - top
+                                                if (relX in 0f..rW && relY in 0f..rH) {
+                                                    val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
+                                                    val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
+                                                    return Pair(rx, ry)
+                                                }
+                                                return null
+                                            }
+
+                                            if (distance > 20f) {
+                                                val p1 = toReal(startOffset)
+                                                val p2 = toReal(lastOffset)
+                                                if (p1 != null && p2 != null) {
+                                                    CoroutineScope(Dispatchers.IO).launch {
+                                                        BackgroundDisplayManager.swipe(
+                                                            x1 = p1.first,
+                                                            y1 = p1.second,
+                                                            x2 = p2.first,
+                                                            y2 = p2.second,
+                                                            durationMs = durationMs,
+                                                        )
+                                                    }
+                                                }
+                                            } else {
+                                                val p = toReal(startOffset)
+                                                if (p != null) {
+                                                    touchFeedback = startOffset
+                                                    CoroutineScope(Dispatchers.IO).launch {
+                                                        BackgroundDisplayManager.tap(x = p.first, y = p.second)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        break
+                                    }
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (bgLiveBmp != null) {
+                        Image(
+                            bitmap = bgLiveBmp.asImageBitmap(),
+                            contentDescription = "Background Display HD Live",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Text("无后台画面", color = Color.Gray, fontSize = 13.sp)
+                    }
+
+                    // Transient Touch Feedback Circle
+                    touchFeedback?.let { pos ->
+                        Box(
+                            modifier = Modifier
+                                .offset { IntOffset(pos.x.toInt() - 16, pos.y.toInt() - 16) }
+                                .size(32.dp)
+                                .border(2.dp, Color(0xFF4ADE80), CircleShape)
+                                .background(Color(0xFF4ADE80).copy(alpha = 0.35f), CircleShape),
+                        )
+                    }
+                }
+
+                // Bottom Control Buttons Row: ◁ 返回、↑ 上滑视频、↓ 下滑、✕ 停止后台屏
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF26262F))
+                            .clickable {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.key(keyCode = KeyEvent.KEYCODE_BACK)
+                                }
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("◁ 返回", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF26262F))
+                            .clickable {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
+                                    val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
+                                    BackgroundDisplayManager.swipe(
+                                        x1 = vW / 2,
+                                        y1 = (vH * 0.75).toInt(),
+                                        x2 = vW / 2,
+                                        y2 = (vH * 0.2).toInt(),
+                                        durationMs = 250,
+                                    )
+                                }
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("↑ 上滑视频", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF26262F))
+                            .clickable {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
+                                    val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
+                                    BackgroundDisplayManager.swipe(
+                                        x1 = vW / 2,
+                                        y1 = (vH * 0.2).toInt(),
+                                        x2 = vW / 2,
+                                        y2 = (vH * 0.75).toInt(),
+                                        durationMs = 250,
+                                    )
+                                }
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("↓ 下滑", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .weight(1.1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF3D1B1E))
+                            .clickable {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.stopSession(killPackages = false)
+                                }
+                                onDismiss()
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("✕ 停止后台屏", fontSize = 12.sp, color = Color(0xFFFF6B6B), fontWeight = FontWeight.Medium)
                     }
                 }
             }
@@ -1302,6 +1693,10 @@ internal fun HelperDetailContent(block: AssistantBlock) {
             if (!d.isEmpty || remainingMs != null) {
                 SubAgentStatChips(d, remainingMs, budgetMinutes = if (info.isRunning) budgetMinutes else null)
             }
+        }
+        val (bgBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+        if (bgBmp != null) {
+            BackgroundDisplayLiveTouchCard(iconTint = accent)
         }
         taskArgs?.let { SubAgentTaskCard(it) }
         // 2. current tool (running only)

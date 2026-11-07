@@ -45,6 +45,16 @@ object BackgroundDisplayManager {
     @Volatile
     var autoRouteA11y: Boolean = false
 
+    val showTakeoverDialogFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    fun openTakeoverDialog() {
+        showTakeoverDialogFlow.value = true
+    }
+
+    fun closeTakeoverDialog() {
+        showTakeoverDialogFlow.value = false
+    }
+
     @Volatile
     private var displayService: IBackgroundDisplayService? = null
     private var imageReader: ImageReader? = null
@@ -169,7 +179,7 @@ object BackgroundDisplayManager {
                         val targetW = (imageReader?.width ?: bmp.width).coerceAtMost(bmp.width)
                         val targetH = (imageReader?.height ?: bmp.height).coerceAtMost(bmp.height)
                         try {
-                            val previewWidth = 360
+                            val previewWidth = 540
                             val previewHeight = ((targetH.toLong() * previewWidth) / targetW.coerceAtLeast(1)).toInt().coerceAtLeast(1)
                             val cropped = if (targetW != bmp.width || targetH != bmp.height) {
                                 Bitmap.createBitmap(bmp, 0, 0, targetW, targetH)
@@ -301,7 +311,7 @@ object BackgroundDisplayManager {
             val targetW = (imageReader?.width ?: src.width).coerceAtMost(src.width)
             val targetH = (imageReader?.height ?: src.height).coerceAtMost(src.height)
             return try {
-                val previewWidth = 360
+                val previewWidth = 540
                 val previewHeight = ((targetH.toLong() * previewWidth) / targetW.coerceAtLeast(1)).toInt().coerceAtLeast(1)
                 val cropped = if (targetW != src.width || targetH != src.height) {
                     Bitmap.createBitmap(src, 0, 0, targetW, targetH)
