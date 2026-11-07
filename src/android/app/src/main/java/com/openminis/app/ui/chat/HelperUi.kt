@@ -890,6 +890,37 @@ internal fun AgentDetailCard(
 
 @Volatile private var lastBackgroundDisplayFailureToastAt = 0L
 
+/** 最近一次接管操作（点击 / 滑动 / 按键）送达的时间，记的是发出时刻；见 [backgroundDisplayNoFrameAfterAction]。 */
+private val lastBackgroundDisplayActionAt = kotlinx.coroutines.flow.MutableStateFlow(0L)
+
+/**
+ * 「操作已发出但画面没变化」提示。自己读当前时间并只在有待确认的操作时每 0.5 秒刷新一次，
+ * 不让整个接管弹窗跟着每秒重组。
+ */
+@Composable
+private fun BackgroundDisplayNoFrameAfterActionHint(modifier: Modifier = Modifier) {
+    val lastActionAt by lastBackgroundDisplayActionAt.collectAsState()
+    val lastFrameAt by BackgroundDisplayManager.frameVersionFlow.collectAsState()
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val pending = lastActionAt > 0L && lastActionAt > lastFrameAt
+    LaunchedEffect(lastActionAt, pending) {
+        while (pending) {
+            nowMs = System.currentTimeMillis()
+            delay(500)
+        }
+    }
+    if (!backgroundDisplayNoFrameAfterAction(lastActionAtMs = lastActionAt, lastFrameAtMs = lastFrameAt, nowMs = nowMs)) return
+    Text(
+        text = BACKGROUND_DISPLAY_NO_FRAME_AFTER_ACTION_HINT,
+        fontSize = 11.sp,
+        color = Color.White.copy(alpha = 0.85f),
+        modifier = modifier
+            .padding(8.dp)
+            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
+}
+
 /**
  * 在 IO 线程把一次接管操作（点击 / 滑动 / 按键）发给后台屏；没送达时弹一条简短提示
  * （之前失败是静默的，用户只看到「点了没反应」）。提示文字与限流见 [backgroundDisplayActionFailureMessage]。
@@ -897,7 +928,9 @@ internal fun AgentDetailCard(
 private fun sendBackgroundDisplayAction(context: android.content.Context, action: () -> Boolean) {
     val appContext = context.applicationContext
     CoroutineScope(Dispatchers.IO).launch {
+        val sentAt = System.currentTimeMillis()
         val delivered = runCatching(action).getOrDefault(false)
+        if (delivered) lastBackgroundDisplayActionAt.value = sentAt
         val message = backgroundDisplayActionFailureMessage(
             delivered = delivered,
             stillLive = BackgroundDisplayManager.activeDisplayId >= 0,
@@ -1163,21 +1196,6 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
     val takeoverState = backgroundDisplayTakeoverState(isLive = bgIsLive, hasFrame = bgLiveBmp != null)
     val controlsEnabled = backgroundDisplayControlsEnabled(takeoverState)
     val context = LocalContext.current
-    // 画面多久没更新：每秒算一次，只在接管画面正常显示（LIVE）时用来提示。
-    val lastFrameAt by BackgroundDisplayManager.frameVersionFlow.collectAsState()
-    val watchingSince = remember(bgIsLive) { System.currentTimeMillis() }
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(bgIsLive) {
-        while (bgIsLive) {
-            nowMs = System.currentTimeMillis()
-            delay(1_000)
-        }
-    }
-    val staleSeconds = if (takeoverState == BackgroundDisplayTakeoverState.LIVE) {
-        backgroundDisplayFrameStaleSeconds(lastFrameAtMs = lastFrameAt, watchingSinceMs = watchingSince, nowMs = nowMs)
-    } else {
-        null
-    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1288,18 +1306,9 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                         Text(backgroundDisplayTakeoverPlaceholder(takeoverState) ?: "", color = Color.Gray, fontSize = 13.sp)
                     }
 
-                    // 画面长时间没变化时的中性提示（不挡操作）
-                    staleSeconds?.let { sec ->
-                        Text(
-                            text = "画面已 ${sec} 秒没有变化：页面可能静止，或后台 App 卡住",
-                            fontSize = 11.sp,
-                            color = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(8.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        )
+                    // 操作送达后迟迟没有新画面时的提示（不挡操作）；静止页面没人操作时不提示。
+                    if (takeoverState == BackgroundDisplayTakeoverState.LIVE) {
+                        BackgroundDisplayNoFrameAfterActionHint(modifier = Modifier.align(Alignment.BottomCenter))
                     }
 
                     // Transient Touch Feedback Circle

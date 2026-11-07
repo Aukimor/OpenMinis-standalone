@@ -43,14 +43,23 @@ class BackgroundDisplayTakeoverStateTest {
         assertTrue(shouldShowBackgroundDisplayFailure(lastShownAtMs = 10_000L, nowMs = 12_000L))
     }
 
-    @Test fun staleFrameHintOnlyAfterThreshold() {
-        // 刚开始看：以开始看的时间为起点，不立刻提示
-        assertNull(backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 1_000L, watchingSinceMs = 100_000L, nowMs = 105_000L))
-        // 10 秒没有新帧：提示 10 秒
-        assertEquals(10, backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 100_000L, watchingSinceMs = 90_000L, nowMs = 110_000L))
-        // 有新帧就重置
-        assertNull(backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 109_000L, watchingSinceMs = 90_000L, nowMs = 110_000L))
-        // 没有任何时间基准：不提示
-        assertNull(backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 0L, watchingSinceMs = 0L, nowMs = 110_000L))
+    @Test fun staticPageWithoutActionNeverHints() {
+        // 静止页面：很久没有新帧，但用户没有操作 → 不提示
+        assertFalse(backgroundDisplayNoFrameAfterAction(lastActionAtMs = 0L, lastFrameAtMs = 1_000L, nowMs = 600_000L))
+        // 操作发生在最后一帧之前（后来已出过新帧），之后静止很久 → 不提示
+        assertFalse(backgroundDisplayNoFrameAfterAction(lastActionAtMs = 5_000L, lastFrameAtMs = 5_200L, nowMs = 600_000L))
+    }
+
+    @Test fun actionWithoutNewFrameHintsAfterThreshold() {
+        // 操作送达后没有新帧：不到 4 秒不提示，满 4 秒提示
+        assertFalse(backgroundDisplayNoFrameAfterAction(lastActionAtMs = 10_000L, lastFrameAtMs = 9_000L, nowMs = 13_999L))
+        assertTrue(backgroundDisplayNoFrameAfterAction(lastActionAtMs = 10_000L, lastFrameAtMs = 9_000L, nowMs = 14_000L))
+        assertTrue(backgroundDisplayNoFrameAfterAction(lastActionAtMs = 10_000L, lastFrameAtMs = 9_000L, nowMs = 60_000L))
+        // 文案不带递增秒数
+        assertFalse(BACKGROUND_DISPLAY_NO_FRAME_AFTER_ACTION_HINT.any { it.isDigit() })
+    }
+
+    @Test fun actionFollowedByNewFrameDoesNotHint() {
+        assertFalse(backgroundDisplayNoFrameAfterAction(lastActionAtMs = 10_000L, lastFrameAtMs = 10_300L, nowMs = 20_000L))
     }
 }
