@@ -506,14 +506,26 @@ internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock
     }
 }
 
-/** The generic tool tile: the output tail, or the tool's icon while there is none. */
 /**
- * 这条工具是不是在操作后台虚拟屏：shell_execute 且命令里调用了 android-a11y-cli。
- * 只有这种工具卡在运行时才显示后台屏预览 / 点击接管（其余工具卡保持原样）。
+ * 这条工具是不是在操作后台虚拟屏：shell_execute 且命令里调用了 android-a11y（android-a11y-cli）
+ * 或现有的后台屏脚本（fast_soda / fast_douyin）。缩略图与工具详情页共用这一个判断。
  */
 internal fun isBackgroundDisplayTool(block: AssistantBlock): Boolean =
-    block.toolName == "shell_execute" && block.toolArgs.contains("android-a11y-cli")
+    block.toolName == "shell_execute" && BACKGROUND_DISPLAY_COMMAND_MARKERS.any { block.toolArgs.contains(it) }
 
+private val BACKGROUND_DISPLAY_COMMAND_MARKERS = listOf("android-a11y", "fast_soda", "fast_douyin")
+
+/**
+ * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：本轮工具里「最新一张」后台屏工具卡
+ * （[isBackgroundDisplayTool]）或子 Agent（Helper）卡。其他卡和更早的卡保持普通缩略图。
+ * 不要求这张卡正在运行：a11y 命令往往不到 1 秒就结束，只认「运行中」的话预览会一闪而过、接管入口点不到。
+ */
+internal fun latestBackgroundDisplayCardId(blocks: List<AssistantBlock>): String? =
+    blocks.lastOrNull {
+        isBackgroundDisplayTool(it) || it.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME
+    }?.id
+
+/** The generic tool tile: the output tail, or the tool's icon while there is none. */
 @Composable
 private fun GenericThumbContent(block: AssistantBlock, toolAccent: Color) {
     if (block.content.isNotEmpty()) {
@@ -560,6 +572,11 @@ private fun ToolPreviewThumbnail(
      */
     punchThroughDepth: Int = 0,
     /**
+     * 这张卡是不是 [latestBackgroundDisplayCardId] 选中的那张：后台屏运行期间它显示实时画面、点击打开接管。
+     * 由调用处根据整轮工具列表算出（这里看不到列表）。
+     */
+    isLatestBackgroundDisplayCard: Boolean = false,
+    /**
      * [T-tool-preview-longpress-close] Long-press handler from the mount site.
      * The menu itself lives there, not here: this view renders itself again
      * for a sub agent's inner tool, and a menu inside would nest. Passed down
@@ -581,10 +598,10 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
     val (bgBitmap, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    // 只有「正在运行、且确实在操作后台虚拟屏」的那条工具才把缩略图换成后台屏画面、点击才打开接管弹窗。
-    // 其他工具卡（包括历史消息里的卡片、浏览器 / 读图卡片）保持原来的缩略图与点击行为；
+    // 后台屏运行期间，只有最新一张后台屏工具卡（含 Helper 卡）把缩略图换成实时画面、点击打开接管弹窗。
+    // 其他工具卡（更早的卡、浏览器 / 读图卡片等）保持原来的缩略图与点击行为；
     // 后台屏结束后（bgIsLive = false）也不再拿残留的最后一帧来显示。
-    val showBgLivePreview = bgIsLive && bgBitmap != null && isLive && isBackgroundDisplayTool(block)
+    val showBgLivePreview = bgIsLive && bgBitmap != null && punchThroughDepth == 0 && isLatestBackgroundDisplayCard
 
     val thumbnailShape = RoundedCornerShape(8.dp)
     // [T-android-agent-thumbnail-accent] A sub agent's tile is marked while
@@ -1364,12 +1381,14 @@ internal fun FloatingToolStatusBar(
                         }
                     }
                 }
+                val latestBgCardId = remember(toolBlocks) { latestBackgroundDisplayCardId(toolBlocks) }
                 ToolPreviewThumbnail(
                     block = block,
                     toolAccent = toolAccent,
                     onClick = { onOpenCurrentDetail() },
                     fallbackImagePath = fallbackImagePath,
                     onLongClick = { showThumbMenu = true },
+                    isLatestBackgroundDisplayCard = block.id == latestBgCardId,
                 )
                 DropdownMenu(expanded = showThumbMenu, onDismissRequest = { showThumbMenu = false }) {
                     DropdownMenuItem(
