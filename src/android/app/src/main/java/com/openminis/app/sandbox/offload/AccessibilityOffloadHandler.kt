@@ -214,6 +214,17 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
             statusForSubAction(sub, args.positional.getOrNull(1), args),
         )
         if (sub != "bg" && sub != "service") {
+            if (args.hasFlag("bg") && BackgroundDisplayManager.activeDisplayId < 0) {
+                val errorMsg = if (BackgroundDisplayManager.handedOverToForeground) {
+                    "Background display was switched to foreground by user"
+                } else {
+                    "No active background display"
+                }
+                return NativeOffloadResult(
+                    1,
+                    JSONObject().put("ok", false).put("error", errorMsg).toString(),
+                )
+            }
             val targetDisplay = resolveTargetDisplayId(args)
             if (targetDisplay != Display.DEFAULT_DISPLAY && targetDisplay == BackgroundDisplayManager.activeDisplayId) {
                 if (!BackgroundDisplayManager.awaitIfPaused()) {
@@ -222,13 +233,6 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                         JSONObject().put("ok", false).put("error", "Background display stopped or handed over to foreground while paused").toString(),
                     )
                 }
-            }
-            val isExplicitFg = args.hasFlag("fg", "main-display") || args.getInt("display") == Display.DEFAULT_DISPLAY
-            if (!isExplicitFg && BackgroundDisplayManager.handedOverToForeground && BackgroundDisplayManager.activeDisplayId < 0) {
-                return NativeOffloadResult(
-                    1,
-                    JSONObject().put("ok", false).put("error", "Background display was switched to foreground by user").toString(),
-                )
             }
         }
         return try {
@@ -295,6 +299,11 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                 val dpi = args.getInt("dpi") ?: dm.densityDpi.takeIf { it > 0 } ?: 420
                 val muteAudio = !args.hasFlag("unmute")
                 val force = args.hasFlag("force")
+                if (!force && BackgroundDisplayManager.isPaused && BackgroundDisplayManager.activeDisplayId >= 0) {
+                    if (!BackgroundDisplayManager.awaitIfPaused()) {
+                        return err(args, "BG_PAUSED_ABORTED", "Background display stopped or handed over to foreground while paused")
+                    }
+                }
                 val res = BackgroundDisplayManager.startSession(
                     context = context,
                     packageName = pkg,

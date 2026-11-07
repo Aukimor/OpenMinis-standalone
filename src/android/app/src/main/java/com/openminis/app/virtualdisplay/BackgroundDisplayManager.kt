@@ -65,6 +65,10 @@ object BackgroundDisplayManager {
     var handedOverToForeground: Boolean = false
         private set
 
+    fun clearHandedOverToForeground() {
+        handedOverToForeground = false
+    }
+
     private val pauseLock = Any()
 
     fun pause() {
@@ -89,7 +93,7 @@ object BackgroundDisplayManager {
      * 用户 UI 手动触控绝不调用此方法。
      * @return true 如果正常恢复（未超时且仍在运行），false 如果虚拟屏已停止/切到前台/超时。
      */
-    fun awaitIfPaused(timeoutMs: Long = 60_000L): Boolean {
+    fun awaitIfPaused(timeoutMs: Long = 600_000L): Boolean {
         if (!isPaused || activeDisplayId < 0) return activeDisplayId >= 0
         val start = System.currentTimeMillis()
         while (isPaused && activeDisplayId >= 0) {
@@ -116,7 +120,9 @@ object BackgroundDisplayManager {
     /**
      * 切换到前台：将当前后台屏 App 切换到手机主屏幕（Display 0）最前台。
      * 记录 handedOverToForeground = true，解除暂停，关闭弹窗，
-     * 不杀死目标 App，不执行 settleBehind，释放虚拟屏后在主屏启动目标 App。
+     * 不杀死目标 App，不执行 settleBehind。
+     * 在释放虚拟屏前先将虚拟屏上的 Task 迁移到主屏（Display 0）最前台，
+     * 保持在当前页面；若无 Task 或迁移失败才 fallback 到 launchIntent 启动入口。
      */
     @Synchronized
     fun switchToForeground(context: Context): Boolean {
@@ -128,17 +134,32 @@ object BackgroundDisplayManager {
         closeTakeoverDialog()
 
         val dId = activeDisplayId
+        var taskMoved = false
         if (dId >= 0) {
+            val svc = displayService
+            val taskId = runCatching { svc?.topTaskId(dId) ?: -1 }.getOrDefault(-1)
+            if (taskId >= 0 && svc != null) {
+                taskMoved = runCatching {
+                    svc.moveTaskToDisplay(taskId, android.view.Display.DEFAULT_DISPLAY)
+                }.getOrDefault(false)
+                if (!taskMoved) {
+                    val res = ShizukuManager.runProcess(arrayOf("am", "display", "move-stack", "$taskId", "0"))
+                    taskMoved = (res.exitCode == 0)
+                }
+                if (taskMoved) {
+                    AppLogger.info(TAG, "Moved task $taskId for $pkg to Display 0 foreground")
+                }
+            }
             runCatching {
-                // 不执行 settleBehind，直接释放虚拟屏
+                // 先迁移任务到主屏，再释放虚拟屏
                 displayService?.releaseAll()
             }
         }
         launchedPackages.clear()
         releaseLocalState()
 
-        if (pkg.isNotBlank()) {
-            AppLogger.info(TAG, "Switching $pkg to foreground on Display 0")
+        if (!taskMoved && pkg.isNotBlank()) {
+            AppLogger.info(TAG, "Switching $pkg to foreground on Display 0 via launchIntent (task move fallback)")
             val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg)?.apply {
                 addFlags(
                     android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
