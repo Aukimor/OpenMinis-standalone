@@ -644,7 +644,8 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.STREAMING ||
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
-    val (bgBitmap, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+    val bgActiveDisplayId by com.openminis.app.virtualdisplay.BackgroundDisplayManager.activeDisplayIdFlow.collectAsState()
+    val bgIsLive = bgActiveDisplayId >= 0
     // Helper 卡只在自己还在运行、且子会话最新的工具（不看是否运行中）是后台屏工具时才算后台屏卡；
     // 无关 Helper（网页调研等）保持原样。
     val helperChildOnBackgroundDisplay =
@@ -657,8 +658,11 @@ private fun ToolPreviewThumbnail(
     // 后台屏运行期间，只有本轮最新一张后台屏工具卡、或子会话正在操作后台屏的 Helper 卡，把缩略图换成实时画面、
     // 点击打开接管弹窗。其他工具卡（更早的卡、无关 Helper、浏览器 / 读图卡片等）保持原来的缩略图与点击行为；
     // 后台屏结束后（bgIsLive = false）也不再拿残留的最后一帧来显示。
-    val showBgLivePreview = bgIsLive && bgBitmap != null && punchThroughDepth == 0 &&
+    // 只有这张卡真要显示实时画面时才登记「有人在看」（其他工具卡不登记，没人看时后台屏不缩放）。
+    val wantsBgLivePreview = bgIsLive && punchThroughDepth == 0 &&
         (isLatestBackgroundDisplayCard || helperChildOnBackgroundDisplay)
+    val (bgBitmap, _) = rememberBackgroundDisplayLiveSnapshot(watching = wantsBgLivePreview)
+    val showBgLivePreview = wantsBgLivePreview && bgBitmap != null
 
     val thumbnailShape = RoundedCornerShape(8.dp)
     // [T-android-agent-thumbnail-accent] A sub agent's tile is marked while

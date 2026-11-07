@@ -61,6 +61,22 @@ object BackgroundDisplayManager {
     private var renderThread: HandlerThread? = null
     private var renderHandler: Handler? = null
 
+    /** 本 App 的包名与 PackageManager 来源（startSession 时记下），bg stop --kill 用来排除自己和系统包。 */
+    @Volatile
+    private var appContext: Context? = null
+
+    /** 本次后台屏会话里启动过的包（bg start / bg launch），bg stop --kill 时逐个 force-stop。 */
+    private val launchedPackages = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
+
+    /** 正在看预览的界面数（聊天里的实时预览卡、接管弹窗）。为 0 时新帧只更新帧版本，不缩放生成缩略图。 */
+    private val previewViewers = PreviewViewerCount()
+
+    /**
+     * 界面开始显示后台屏预览时调用，离开时调用返回的释放函数（可重复调用，只生效一次）。
+     * 没人看时跳过缩放；有人开始看时，[getUiPreviewBitmap] 会从最新一帧立即生成一张，不会空白。
+     */
+    fun acquirePreviewViewer(): () -> Unit = previewViewers.acquire()
+
     private val frameLock = Any()
     private var latestBitmap: Bitmap? = null
     private var lastUiPreviewBitmap: Bitmap? = null
@@ -140,6 +156,7 @@ object BackgroundDisplayManager {
         force: Boolean = false,
     ): SessionResult {
         stopSession(killPackages = false)
+        appContext = context.applicationContext
 
         val serviceReady = ensureServiceBound(context)
         if (!serviceReady || displayService == null) {
@@ -177,7 +194,13 @@ object BackgroundDisplayManager {
                     bmp.copyPixelsFromBuffer(plane.buffer)
 
                     val now = System.currentTimeMillis()
-                    if (now - lastPreviewUpdateTs >= 150L) {
+                    if (now - lastPreviewUpdateTs >= 150L && !previewViewers.isWatched) {
+                        // 没有界面在看预览：不缩放，只照常更新帧版本（接管弹窗「操作后无新帧」提示等依赖它）。
+                        // 丢掉旧缩略图的引用（不 recycle，界面可能还拿着），下次有人看时从最新一帧现生成。
+                        lastPreviewUpdateTs = now
+                        lastUiPreviewBitmap = null
+                        frameVersionFlow.value = now
+                    } else if (now - lastPreviewUpdateTs >= 150L) {
                         lastPreviewUpdateTs = now
                         val targetW = (imageReader?.width ?: bmp.width).coerceAtMost(bmp.width)
                         val targetH = (imageReader?.height ?: bmp.height).coerceAtMost(bmp.height)
@@ -252,7 +275,11 @@ object BackgroundDisplayManager {
             currentPackageName = packageName
             activeDisplayIdFlow.value = dId
             val code = runCatching { svc.startApp(dId, packageName, -1, force) }.getOrDefault(3)
-            if (code == 0) return SessionResult(true, dId, "Launched $packageName on display $dId")
+            if (code == 0) {
+                // 只记启动成功的包：失败的包可能正在主屏被用户使用，bg stop --kill 不能误关它
+                launchedPackages += packageName
+                return SessionResult(true, dId, "Launched $packageName on display $dId")
+            }
         }
 
         if (force) {
@@ -266,6 +293,7 @@ object BackgroundDisplayManager {
         }
         val res = ShizukuManager.runProcess(cmd)
         return if (res.exitCode == 0) {
+            launchedPackages += packageName
             SessionResult(true, dId, "Launched $packageName on display $dId")
         } else {
             SessionResult(false, dId, "Failed to launch $packageName: ${res.combined}")
@@ -279,12 +307,49 @@ object BackgroundDisplayManager {
             runCatching {
                 if (!killPackages) {
                     displayService?.settleBehind(dId)
+                } else {
+                    // 失败也不能挡住下面的 releaseAll
+                    runCatching { forceStopDisplayPackages(dId) }
                 }
                 displayService?.releaseAll()
             }
         }
+        launchedPackages.clear()
 
         releaseLocalState()
+    }
+
+    /**
+     * bg stop --kill：在释放虚拟屏之前，结束这块屏上运行过的 App（本次会话启动成功的包 + 当前顶层 Activity 的包）。
+     * 不用 currentPackageName：它在启动前就被赋值，启动失败的包也会在里面。
+     * 用已有的 `am force-stop`（Shizuku，UID 2000），不碰 OpenMinis 自己和系统包。
+     */
+    private fun forceStopDisplayPackages(displayId: Int) {
+        val top = runCatching { displayService?.topActivity(displayId) }.getOrNull()
+        val candidates = synchronized(launchedPackages) { launchedPackages.toList() } + listOfNotNull(top)
+        val ctx = appContext
+        // 系统包清单用 Shizuku（UID 2000）查：本 App 受 Android 11+ 包可见性限制，PackageManager 看不到多数第三方 App。
+        val systemPkgs = systemPackages()
+        val targets = BackgroundDisplayKill.packagesToForceStop(
+            candidates = candidates,
+            selfPackage = ctx?.packageName ?: "com.openminis.app",
+            isSystemPackage = { pkg -> systemPkgs?.contains(pkg) ?: true }, // 查不到清单时宁可不杀
+        )
+        for (pkg in targets) {
+            val res = runCatching { ShizukuManager.runProcess(arrayOf("am", "force-stop", pkg)) }.getOrNull()
+            if (res == null || res.exitCode != 0) {
+                AppLogger.warning(TAG, "force-stop $pkg failed: ${res?.combined ?: "no result"}")
+            } else {
+                AppLogger.info(TAG, "force-stopped $pkg (bg stop --kill, display $displayId)")
+            }
+        }
+    }
+
+    /** `pm list packages -s` 的结果；失败时返回 null。 */
+    private fun systemPackages(): Set<String>? {
+        val res = runCatching { ShizukuManager.runProcess(arrayOf("pm", "list", "packages", "-s")) }.getOrNull() ?: return null
+        if (res.exitCode != 0) return null
+        return BackgroundDisplayKill.parsePmList(res.combined).takeIf { it.isNotEmpty() }
     }
 
     /**

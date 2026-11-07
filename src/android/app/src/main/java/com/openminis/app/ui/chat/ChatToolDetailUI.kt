@@ -490,12 +490,11 @@ internal fun ToolDetailSheet(
                         // sheet may stay open after the run completes (user reading
                         // output), and we don't want a stuck HUD there.
                         val sheetMonitor = rememberSystemResourceMonitor(active = isLive)
-                        val (bgBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+                        // 只有后台屏工具的详情才登记「有人在看」，普通 shell 详情不登记。
+                        val wantsBgCardInShell = isBackgroundDisplayTool(block) || block.content.contains("displayId")
+                        val (bgBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot(watching = wantsBgCardInShell)
                         // 只在后台屏仍在运行时显示；结束后不再展示残留的最后一帧。
-                        val showBgCardInShell = bgIsLive && bgBmp != null && (
-                            isBackgroundDisplayTool(block) ||
-                            block.content.contains("displayId")
-                        )
+                        val showBgCardInShell = bgIsLive && bgBmp != null && wantsBgCardInShell
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()

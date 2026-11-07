@@ -14637,8 +14637,9 @@ class ChatViewModel(
                 }
                 val (tool, activity) = childCurrentTool()
                 writeBlock(hr.progressJson(child.id, title, tool, activity, now - startedAt))
-                // A tick, cut short by a tool-only stop so the move is prompt.
-                withTimeoutOrNull(1_000L) { delegateDetach.first { it != detachSeen } }
+                // A tick, cut short by a tool-only stop so the move is prompt,
+                // and by the child finishing so its result returns at once.
+                awaitDelegateWaitTick(1_000L, childVm.isStreaming, delegateDetach, detachSeen)
             }
         } catch (e: CancellationException) {
             withContext(kotlinx.coroutines.NonCancellable + Dispatchers.Main) {
