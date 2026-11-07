@@ -42,4 +42,15 @@ class BackgroundDisplayTakeoverStateTest {
         assertFalse(shouldShowBackgroundDisplayFailure(lastShownAtMs = 10_000L, nowMs = 11_000L))
         assertTrue(shouldShowBackgroundDisplayFailure(lastShownAtMs = 10_000L, nowMs = 12_000L))
     }
+
+    @Test fun staleFrameHintOnlyAfterThreshold() {
+        // 刚开始看：以开始看的时间为起点，不立刻提示
+        assertNull(backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 1_000L, watchingSinceMs = 100_000L, nowMs = 105_000L))
+        // 10 秒没有新帧：提示 10 秒
+        assertEquals(10, backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 100_000L, watchingSinceMs = 90_000L, nowMs = 110_000L))
+        // 有新帧就重置
+        assertNull(backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 109_000L, watchingSinceMs = 90_000L, nowMs = 110_000L))
+        // 没有任何时间基准：不提示
+        assertNull(backgroundDisplayFrameStaleSeconds(lastFrameAtMs = 0L, watchingSinceMs = 0L, nowMs = 110_000L))
+    }
 }

@@ -58,3 +58,19 @@ internal fun backgroundDisplayActionFailureMessage(delivered: Boolean, stillLive
 /** 失败提示限流：距上次提示不足 [minIntervalMs] 就不再弹，避免连续滑动时刷屏。 */
 internal fun shouldShowBackgroundDisplayFailure(lastShownAtMs: Long, nowMs: Long, minIntervalMs: Long = 2_000L): Boolean =
     lastShownAtMs <= 0L || nowMs - lastShownAtMs >= minIntervalMs
+
+/**
+ * 接管画面多久没有新帧了（秒），未超过 [thresholdMs] 时返回 null。
+ * 计时起点取「最后一帧时间」和「本次开始看画面的时间」中较晚的那个，刚打开弹窗不会立刻提示。
+ * 虚拟屏只有内容变化才出新帧，所以这只是一个中性提示（页面静止或后台 App 卡住），不当作错误。
+ */
+internal fun backgroundDisplayFrameStaleSeconds(
+    lastFrameAtMs: Long,
+    watchingSinceMs: Long,
+    nowMs: Long,
+    thresholdMs: Long = 10_000L,
+): Int? {
+    val since = maxOf(lastFrameAtMs, watchingSinceMs)
+    val age = nowMs - since
+    return if (since > 0L && age >= thresholdMs) (age / 1000L).toInt() else null
+}

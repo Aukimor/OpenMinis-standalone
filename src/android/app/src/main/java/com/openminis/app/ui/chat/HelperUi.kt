@@ -1163,6 +1163,21 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
     val takeoverState = backgroundDisplayTakeoverState(isLive = bgIsLive, hasFrame = bgLiveBmp != null)
     val controlsEnabled = backgroundDisplayControlsEnabled(takeoverState)
     val context = LocalContext.current
+    // 画面多久没更新：每秒算一次，只在接管画面正常显示（LIVE）时用来提示。
+    val lastFrameAt by BackgroundDisplayManager.frameVersionFlow.collectAsState()
+    val watchingSince = remember(bgIsLive) { System.currentTimeMillis() }
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(bgIsLive) {
+        while (bgIsLive) {
+            nowMs = System.currentTimeMillis()
+            delay(1_000)
+        }
+    }
+    val staleSeconds = if (takeoverState == BackgroundDisplayTakeoverState.LIVE) {
+        backgroundDisplayFrameStaleSeconds(lastFrameAtMs = lastFrameAt, watchingSinceMs = watchingSince, nowMs = nowMs)
+    } else {
+        null
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1271,6 +1286,20 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                         )
                     } else {
                         Text(backgroundDisplayTakeoverPlaceholder(takeoverState) ?: "", color = Color.Gray, fontSize = 13.sp)
+                    }
+
+                    // 画面长时间没变化时的中性提示（不挡操作）
+                    staleSeconds?.let { sec ->
+                        Text(
+                            text = "画面已 ${sec} 秒没有变化：页面可能静止，或后台 App 卡住",
+                            fontSize = 11.sp,
+                            color = Color.White.copy(alpha = 0.85f),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(8.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
                     }
 
                     // Transient Touch Feedback Circle
