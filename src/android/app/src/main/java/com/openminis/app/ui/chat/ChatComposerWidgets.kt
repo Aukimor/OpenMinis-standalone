@@ -507,13 +507,26 @@ internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock
 }
 
 /**
- * 这条工具是不是在操作后台虚拟屏：shell_execute 且命令里调用了 android-a11y（android-a11y-cli）
- * 或现有的后台屏脚本（fast_soda / fast_douyin）。缩略图与工具详情页共用这一个判断。
+ * 这条工具是不是在操作后台虚拟屏：shell_execute 且命令里**作为命令**调用了 android-a11y-cli
+ * 或现有的后台屏脚本（fast_soda / fast_douyin）。按命令词边界匹配——只认整词 `android-a11y-cli`
+ * 且后面不接后缀，所以读文档的 `cat android-a11y-cli.md` / `cat android-a11y.md` 不会误判。
+ * 缩略图与工具详情页共用这一个判断。
  */
 internal fun isBackgroundDisplayTool(block: AssistantBlock): Boolean =
-    block.toolName == "shell_execute" && BACKGROUND_DISPLAY_COMMAND_MARKERS.any { block.toolArgs.contains(it) }
+    block.toolName == "shell_execute" &&
+        BACKGROUND_DISPLAY_COMMAND_REGEX.containsMatchIn(backgroundDisplayCommandOf(block))
 
-private val BACKGROUND_DISPLAY_COMMAND_MARKERS = listOf("android-a11y", "fast_soda", "fast_douyin")
+/** 取 shell_execute 的 `command` 字段；解析不到就退回原始 toolArgs。 */
+private fun backgroundDisplayCommandOf(block: AssistantBlock): String =
+    try { org.json.JSONObject(block.toolArgs).optString("command", block.toolArgs) } catch (_: Exception) { block.toolArgs }
+
+/**
+ * 命令词边界匹配：`android-a11y-cli` 作为整词（前面是命令分隔、后面不接字母数字/._-，避免命中
+ * `android-a11y-cli.md` 这类文档名）；`fast_soda` / `fast_douyin` 作为脚本名（允许 .sh/.py 后缀）。
+ * 前缀用 `/` 作命令路径（如 /usr/local/bin/android-a11y-cli）仍能命中。
+ */
+private val BACKGROUND_DISPLAY_COMMAND_REGEX =
+    Regex("""(?<![\w.-])(?:android-a11y-cli(?![\w.-])|fast_soda|fast_douyin)""")
 
 /**
  * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：本轮工具里「最新一张」后台屏工具卡

@@ -38,8 +38,15 @@ class BackgroundDisplayToolPredicateTest {
         assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"ls -la"}""")))
         // 旧判断里的 "bg " 子串会误中普通命令
         assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat bg notes.txt"}""")))
+        // 读文档不是操作后台屏：按命令词边界匹配，带后缀的名字不命中（旧的子串 "android-a11y" 会误中）
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat android-a11y-cli.md"}""")))
+        assertFalse(isBackgroundDisplayTool(block("shell_execute", """{"command":"cat android-a11y.md"}""")))
         assertFalse(isBackgroundDisplayTool(block("browser_use", """{"action":"screenshot"}""")))
         assertFalse(isBackgroundDisplayTool(block("read_image", """{"path":"/tmp/a.png"}""")))
         assertFalse(isBackgroundDisplayTool(block("file_read", """{"path":"android-a11y-cli.md"}""")))
+    }
+
+    @Test fun commandByPathStillCounts() {
+        assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"/usr/local/bin/android-a11y-cli bg status"}""")))
     }
 }
