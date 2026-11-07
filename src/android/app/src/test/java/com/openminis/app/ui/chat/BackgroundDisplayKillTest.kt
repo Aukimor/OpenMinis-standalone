@@ -36,4 +36,18 @@ class BackgroundDisplayKillTest {
     @Test fun parsesPmList() {
         assertEquals(setOf("android", "com.android.chrome"), BackgroundDisplayKill.parsePmList("package:android\npackage:com.android.chrome\n\nWARNING: x\n"))
     }
+
+    @Test fun onlySuccessfulLaunchesAreRemembered() {
+        val src = com.openminis.app.ProductionSources.read("virtualdisplay/BackgroundDisplayManager.kt")
+        val launch = src.substringAfter("    fun launchApp(").substringBefore("    @Synchronized")
+        val adds = Regex("launchedPackages \\+= packageName").findAll(launch).map { it.range.first }.toList()
+        assertEquals("Binder 成功和 am start 成功两处", 2, adds.size)
+        val binderOk = launch.indexOf("if (code == 0) {")
+        val shellOk = launch.indexOf("return if (res.exitCode == 0) {")
+        org.junit.Assert.assertTrue(binderOk in 0 until adds[0] && adds[0] < launch.indexOf("if (force)"))
+        org.junit.Assert.assertTrue(shellOk in 0 until adds[1])
+        // 候选里不能有 currentPackageName（启动前就赋值）
+        val kill = src.substringAfter("    private fun forceStopDisplayPackages(").substringBefore("    private fun systemPackages(")
+        org.junit.Assert.assertFalse(kill.contains("currentPackageName"))
+    }
 }

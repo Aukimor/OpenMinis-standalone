@@ -271,12 +271,15 @@ object BackgroundDisplayManager {
             runCatching { svc.setAudioMuted(packageName, true) }
         }
 
-        launchedPackages += packageName
         if (svc != null) {
             currentPackageName = packageName
             activeDisplayIdFlow.value = dId
             val code = runCatching { svc.startApp(dId, packageName, -1, force) }.getOrDefault(3)
-            if (code == 0) return SessionResult(true, dId, "Launched $packageName on display $dId")
+            if (code == 0) {
+                // 只记启动成功的包：失败的包可能正在主屏被用户使用，bg stop --kill 不能误关它
+                launchedPackages += packageName
+                return SessionResult(true, dId, "Launched $packageName on display $dId")
+            }
         }
 
         if (force) {
@@ -290,6 +293,7 @@ object BackgroundDisplayManager {
         }
         val res = ShizukuManager.runProcess(cmd)
         return if (res.exitCode == 0) {
+            launchedPackages += packageName
             SessionResult(true, dId, "Launched $packageName on display $dId")
         } else {
             SessionResult(false, dId, "Failed to launch $packageName: ${res.combined}")
@@ -316,12 +320,13 @@ object BackgroundDisplayManager {
     }
 
     /**
-     * bg stop --kill：在释放虚拟屏之前，结束这块屏上运行过的 App（本次会话启动过的包 + 当前顶层 Activity 的包）。
+     * bg stop --kill：在释放虚拟屏之前，结束这块屏上运行过的 App（本次会话启动成功的包 + 当前顶层 Activity 的包）。
+     * 不用 currentPackageName：它在启动前就被赋值，启动失败的包也会在里面。
      * 用已有的 `am force-stop`（Shizuku，UID 2000），不碰 OpenMinis 自己和系统包。
      */
     private fun forceStopDisplayPackages(displayId: Int) {
         val top = runCatching { displayService?.topActivity(displayId) }.getOrNull()
-        val candidates = synchronized(launchedPackages) { launchedPackages.toList() } + listOfNotNull(currentPackageName, top)
+        val candidates = synchronized(launchedPackages) { launchedPackages.toList() } + listOfNotNull(top)
         val ctx = appContext
         // 系统包清单用 Shizuku（UID 2000）查：本 App 受 Android 11+ 包可见性限制，PackageManager 看不到多数第三方 App。
         val systemPkgs = systemPackages()
