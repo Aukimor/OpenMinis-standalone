@@ -90,6 +90,28 @@ class BackgroundDisplayToolPredicateTest {
         assertEquals(0, currentTurnStartIndex(listOf(messages[2])))
     }
 
+    @Test fun helperShowsBackgroundDisplayFromChildLatestToolRegardlessOfItsStatus() {
+        fun shell(id: String, cmd: String, st: ToolBlockStatus) = AssistantBlock(id = id, kind = "tool_use",
+            toolName = "shell_execute", toolArgs = """{"command":"$cmd"}""", toolStatus = st)
+        val helperName = com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME
+        fun helper(st: ToolBlockStatus) = AssistantBlock(id = "h", kind = "tool_use", toolName = helperName, toolArgs = "{}", toolStatus = st)
+        // 子会话的 a11y 命令已经结束（不到 1 秒），中间没有别的工具：仍取到它，不按状态过滤
+        val childTools = listOf(shell("c1", "ls", ToolBlockStatus.SUCCESS), shell("c2", "android-a11y-cli tap 1 2", ToolBlockStatus.SUCCESS))
+        val latest = pickChildToolBlock(childTools, activeOnly = false)
+        assertEquals("c2", latest?.id)
+        assertNull(pickChildToolBlock(childTools, activeOnly = true)) // 原行为不变：只取运行中的
+        assertTrue(helperShowsBackgroundDisplay(helper(ToolBlockStatus.RUNNING), latest))
+        // Helper 已结束：不显示
+        assertFalse(helperShowsBackgroundDisplay(helper(ToolBlockStatus.SUCCESS), latest))
+        // 无关 Helper：子会话最新工具不是后台屏工具
+        val unrelated = pickChildToolBlock(listOf(shell("c3", "curl https://example.com", ToolBlockStatus.RUNNING)), activeOnly = false)
+        assertFalse(helperShowsBackgroundDisplay(helper(ToolBlockStatus.RUNNING), unrelated))
+        // 子会话还没有工具
+        assertFalse(helperShowsBackgroundDisplay(helper(ToolBlockStatus.RUNNING), null))
+        // 不是 Helper 的卡不走这条判断
+        assertFalse(helperShowsBackgroundDisplay(shell("x", "android-a11y-cli tap 1 2", ToolBlockStatus.RUNNING), latest))
+    }
+
     @Test fun commandByPathStillCounts() {
         assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"/usr/local/bin/android-a11y-cli bg status"}""")))
     }

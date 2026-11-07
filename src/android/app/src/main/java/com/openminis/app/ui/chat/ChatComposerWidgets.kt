@@ -477,7 +477,15 @@ internal fun MicButton(
  * does.
  */
 @Composable
-internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock? {
+internal fun rememberChildLiveToolBlock(
+    childSessionId: String?,
+    /**
+     * true（默认，原行为）：只取子会话最新一轮里「正在运行」的工具块。
+     * false：取最新一轮的最后一个工具块，不管状态——后台屏预览用它判断 Helper 是不是在操作后台屏，
+     * 因为 a11y 命令往往不到 1 秒就结束，只认运行中会一闪而过（见 [helperShowsBackgroundDisplay]）。
+     */
+    activeOnly: Boolean = true,
+): AssistantBlock? {
     if (childSessionId.isNullOrEmpty()) return null
     val vm = remember(childSessionId) {
         runCatching { ChatViewModelStore.existing(childSessionId) }.getOrNull()
@@ -493,18 +501,39 @@ internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock
         // tool on the newest assistant turn; the subset carries exactly that
         // without copying the child's whole history each token.
         val merged = if (streaming.isEmpty()) msgs else streamingOverlaySubset(msgs, streaming)
-        (merged.lastOrNull { it.role == "assistant" }
-            ?: msgs.lastOrNull { it.role == "assistant" })
-            ?.toolBlocks
-            ?.lastOrNull {
-                it.kind == "tool_use" && (
-                    it.toolStatus == ToolBlockStatus.RUNNING ||
-                        it.toolStatus == ToolBlockStatus.STREAMING ||
-                        it.toolStatus == ToolBlockStatus.PENDING
-                    )
-            }
+        pickChildToolBlock(
+            (merged.lastOrNull { it.role == "assistant" } ?: msgs.lastOrNull { it.role == "assistant" })?.toolBlocks,
+            activeOnly,
+        )
     }
 }
+
+/**
+ * 从子会话最新一轮助手消息的工具块里取一个：[activeOnly] 为 true 时取最后一个运行中（RUNNING /
+ * STREAMING / PENDING）的工具块（[rememberChildLiveToolBlock] 原行为），为 false 时取最后一个工具块、不看状态。
+ */
+internal fun pickChildToolBlock(toolBlocks: List<AssistantBlock>?, activeOnly: Boolean): AssistantBlock? =
+    toolBlocks?.lastOrNull {
+        it.kind == "tool_use" && (
+            !activeOnly ||
+                it.toolStatus == ToolBlockStatus.RUNNING ||
+                it.toolStatus == ToolBlockStatus.STREAMING ||
+                it.toolStatus == ToolBlockStatus.PENDING
+            )
+    }
+
+/**
+ * Helper（子 Agent）卡要不要显示后台屏实时画面：Helper 本身还在运行，且子会话最新的工具块（不按状态过滤，
+ * 见 [pickChildToolBlock]）是后台屏工具。无关 Helper（网页调研等）、已结束的 Helper 保持原样。
+ */
+internal fun helperShowsBackgroundDisplay(helperBlock: AssistantBlock, childLatestTool: AssistantBlock?): Boolean =
+    helperBlock.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME &&
+        (
+            helperBlock.toolStatus == ToolBlockStatus.RUNNING ||
+                helperBlock.toolStatus == ToolBlockStatus.STREAMING ||
+                helperBlock.toolStatus == ToolBlockStatus.PENDING
+            ) &&
+        childLatestTool != null && isBackgroundDisplayTool(childLatestTool)
 
 /**
  * 这条工具是不是在操作后台虚拟屏：shell_execute 且命令里**作为命令**调用了 android-a11y-cli
@@ -615,11 +644,12 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
     val (bgBitmap, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    // Helper 卡只在其子会话「当前工具」本身是后台屏工具时才算后台屏卡；无关 Helper（网页调研等）保持原样。
+    // Helper 卡只在自己还在运行、且子会话最新的工具（不看是否运行中）是后台屏工具时才算后台屏卡；
+    // 无关 Helper（网页调研等）保持原样。
     val helperChildOnBackgroundDisplay =
         if (bgIsLive && punchThroughDepth == 0 && block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME) {
             val childId = remember(block.content, block.toolStatus, block.toolTitle) { parseHelperBlock(block).childSessionId }
-            rememberChildLiveToolBlock(childId)?.let(::isBackgroundDisplayTool) == true
+            helperShowsBackgroundDisplay(block, rememberChildLiveToolBlock(childId, activeOnly = false))
         } else {
             false
         }
