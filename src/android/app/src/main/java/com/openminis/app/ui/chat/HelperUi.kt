@@ -69,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -1135,7 +1136,8 @@ internal fun BackgroundDisplayLiveTouchCard(
 internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
     val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
     val activeDisplayId = BackgroundDisplayManager.activeDisplayId
-    val currentPkg = BackgroundDisplayManager.currentPackageName
+    val takeoverState = backgroundDisplayTakeoverState(isLive = bgIsLive, hasFrame = bgLiveBmp != null)
+    val controlsEnabled = backgroundDisplayControlsEnabled(takeoverState)
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1175,11 +1177,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                                 .size(8.dp)
                                 .background(if (bgIsLive) Color(0xFF4ADE80) else Color.Gray, CircleShape),
                         )
-                        val titleText = if (bgIsLive) {
-                            "📱 后台屏幕实时接管 (Display #${activeDisplayId})"
-                        } else {
-                            "📱 后台屏幕画面 (${currentPkg.ifEmpty { "已结束" }})"
-                        }
+                        val titleText = backgroundDisplayTakeoverTitle(takeoverState, activeDisplayId)
                         Text(
                             text = titleText,
                             fontSize = 14.sp,
@@ -1204,6 +1202,14 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                         )
                     }
                 }
+
+                // 状态说明：正在接管 / 启动中 / 已停止，以及怎么退出接管。
+                Text(
+                    text = backgroundDisplayTakeoverHint(takeoverState),
+                    fontSize = 11.sp,
+                    color = if (takeoverState == BackgroundDisplayTakeoverState.STOPPED) Color(0xFFFF9F43) else Color.White.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
 
                 // Middle: HD Live Screen with Touch & Swipe Control
                 var containerSize by remember { mutableStateOf(IntSize.Zero) }
@@ -1239,7 +1245,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             modifier = Modifier.fillMaxSize(),
                         )
                     } else {
-                        Text("无后台画面", color = Color.Gray, fontSize = 13.sp)
+                        Text(backgroundDisplayTakeoverPlaceholder(takeoverState) ?: "", color = Color.Gray, fontSize = 13.sp)
                     }
 
                     // Transient Touch Feedback Circle
@@ -1255,9 +1261,11 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                 }
 
                 // Bottom Control Buttons Row: ◁ 返回、↑ 上滑视频、↓ 下滑、✕ 停止后台屏
+                // 后台屏停止后按钮变灰且不可点（之前停止后仍可点，但点了没有任何效果）。
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .alpha(if (controlsEnabled) 1f else 0.4f)
                         .padding(top = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1267,7 +1275,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
-                            .clickable {
+                            .clickable(enabled = controlsEnabled) {
                                 CoroutineScope(Dispatchers.IO).launch {
                                     BackgroundDisplayManager.key(keyCode = KeyEvent.KEYCODE_BACK)
                                 }
@@ -1283,7 +1291,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
-                            .clickable {
+                            .clickable(enabled = controlsEnabled) {
                                 CoroutineScope(Dispatchers.IO).launch {
                                     val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
                                     val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
@@ -1307,7 +1315,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
-                            .clickable {
+                            .clickable(enabled = controlsEnabled) {
                                 CoroutineScope(Dispatchers.IO).launch {
                                     val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
                                     val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
@@ -1331,7 +1339,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .weight(1.1f)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF3D1B1E))
-                            .clickable {
+                            .clickable(enabled = controlsEnabled) {
                                 CoroutineScope(Dispatchers.IO).launch {
                                     BackgroundDisplayManager.stopSession(killPackages = false)
                                 }
