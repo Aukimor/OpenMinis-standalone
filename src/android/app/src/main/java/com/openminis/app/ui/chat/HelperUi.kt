@@ -64,6 +64,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -886,6 +887,106 @@ internal fun AgentDetailCard(
     }
 }
 
+/**
+ * 后台虚拟屏预览上的点击 / 滑动转发（预览卡片与全屏接管弹窗共用）。
+ *
+ * 只用 [isLive] 作为 pointerInput 的 key：画面位图约每 0.15s 换一次，如果把它也当 key，
+ * 手势进行到一半就会被重启，导致滑动、点击失灵。位图尺寸、容器尺寸与回调都经
+ * rememberUpdatedState 在手势结束时读取最新值。
+ */
+@Composable
+private fun Modifier.backgroundDisplayTouchInput(
+    isLive: Boolean,
+    frame: android.graphics.Bitmap?,
+    containerSize: () -> IntSize,
+    onTapFeedback: (Offset) -> Unit,
+): Modifier {
+    val latestFrameSize = rememberUpdatedState(
+        if (frame != null && !frame.isRecycled) IntSize(frame.width, frame.height) else IntSize.Zero,
+    )
+    val latestContainerSize = rememberUpdatedState(containerSize)
+    val latestOnTapFeedback = rememberUpdatedState(onTapFeedback)
+    return pointerInput(isLive) {
+        if (!isLive) return@pointerInput
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            val startOffset = down.position
+            val startTime = System.currentTimeMillis()
+            var lastOffset = startOffset
+            down.consume()
+
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (change.pressed) {
+                    lastOffset = change.position
+                    change.consume()
+                } else {
+                    change.consume()
+                    val endTime = System.currentTimeMillis()
+                    val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
+                    val dx = lastOffset.x - startOffset.x
+                    val dy = lastOffset.y - startOffset.y
+                    val distance = kotlin.math.hypot(dx, dy)
+
+                    val container = latestContainerSize.value()
+                    val cW = container.width
+                    val cH = container.height
+                    val bW = latestFrameSize.value.width
+                    val bH = latestFrameSize.value.height
+
+                    if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
+                        val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
+                        val rW = bW * scale
+                        val rH = bH * scale
+                        val left = (cW - rW) / 2f
+                        val top = (cH - rH) / 2f
+
+                        val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
+                        val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
+
+                        fun toReal(offset: Offset): Pair<Int, Int>? {
+                            val relX = offset.x - left
+                            val relY = offset.y - top
+                            if (relX in 0f..rW && relY in 0f..rH) {
+                                val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
+                                val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
+                                return Pair(rx, ry)
+                            }
+                            return null
+                        }
+
+                        if (distance > 20f) {
+                            val p1 = toReal(startOffset)
+                            val p2 = toReal(lastOffset)
+                            if (p1 != null && p2 != null) {
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.swipe(
+                                        x1 = p1.first,
+                                        y1 = p1.second,
+                                        x2 = p2.first,
+                                        y2 = p2.second,
+                                        durationMs = durationMs,
+                                    )
+                                }
+                            }
+                        } else {
+                            val p = toReal(startOffset)
+                            if (p != null) {
+                                latestOnTapFeedback.value(startOffset)
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.tap(x = p.first, y = p.second)
+                                }
+                            }
+                        }
+                    }
+                    break
+                }
+            }
+        }
+    }
+}
+
 @Composable
 internal fun BackgroundDisplayLiveTouchCard(
     modifier: Modifier = Modifier,
@@ -919,84 +1020,12 @@ internal fun BackgroundDisplayLiveTouchCard(
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xFF0F0F12))
                     .onSizeChanged { containerSize = it }
-                    .pointerInput(bgIsLive, bgLiveBmp) {
-                        if (!bgIsLive || bgLiveBmp == null) return@pointerInput
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            val startOffset = down.position
-                            val startTime = System.currentTimeMillis()
-                            var lastOffset = startOffset
-                            down.consume()
-
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                if (change.pressed) {
-                                    lastOffset = change.position
-                                    change.consume()
-                                } else {
-                                    change.consume()
-                                    val endTime = System.currentTimeMillis()
-                                    val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
-                                    val dx = lastOffset.x - startOffset.x
-                                    val dy = lastOffset.y - startOffset.y
-                                    val distance = kotlin.math.hypot(dx, dy)
-
-                                    val cW = containerSize.width
-                                    val cH = containerSize.height
-                                    val bW = bgLiveBmp.width
-                                    val bH = bgLiveBmp.height
-
-                                    if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
-                                        val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
-                                        val rW = bW * scale
-                                        val rH = bH * scale
-                                        val left = (cW - rW) / 2f
-                                        val top = (cH - rH) / 2f
-
-                                        val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
-                                        val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
-
-                                        fun toReal(offset: Offset): Pair<Int, Int>? {
-                                            val relX = offset.x - left
-                                            val relY = offset.y - top
-                                            if (relX in 0f..rW && relY in 0f..rH) {
-                                                val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
-                                                val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
-                                                return Pair(rx, ry)
-                                            }
-                                            return null
-                                        }
-
-                                        if (distance > 20f) {
-                                            val p1 = toReal(startOffset)
-                                            val p2 = toReal(lastOffset)
-                                            if (p1 != null && p2 != null) {
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    BackgroundDisplayManager.swipe(
-                                                        x1 = p1.first,
-                                                        y1 = p1.second,
-                                                        x2 = p2.first,
-                                                        y2 = p2.second,
-                                                        durationMs = durationMs,
-                                                    )
-                                                }
-                                            }
-                                        } else {
-                                            val p = toReal(startOffset)
-                                            if (p != null) {
-                                                touchFeedback = startOffset
-                                                CoroutineScope(Dispatchers.IO).launch {
-                                                    BackgroundDisplayManager.tap(x = p.first, y = p.second)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    break
-                                }
-                            }
-                        }
-                    },
+                    .backgroundDisplayTouchInput(
+                        isLive = bgIsLive,
+                        frame = bgLiveBmp,
+                        containerSize = { containerSize },
+                        onTapFeedback = { touchFeedback = it },
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
                 Image(
@@ -1193,84 +1222,12 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                         .clip(RoundedCornerShape(10.dp))
                         .background(Color(0xFF0A0A0D))
                         .onSizeChanged { containerSize = it }
-                        .pointerInput(bgIsLive, bgLiveBmp) {
-                            if (!bgIsLive || bgLiveBmp == null) return@pointerInput
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val startOffset = down.position
-                                val startTime = System.currentTimeMillis()
-                                var lastOffset = startOffset
-                                down.consume()
-
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (change.pressed) {
-                                        lastOffset = change.position
-                                        change.consume()
-                                    } else {
-                                        change.consume()
-                                        val endTime = System.currentTimeMillis()
-                                        val durationMs = (endTime - startTime).coerceIn(50, 1000).toInt()
-                                        val dx = lastOffset.x - startOffset.x
-                                        val dy = lastOffset.y - startOffset.y
-                                        val distance = kotlin.math.hypot(dx, dy)
-
-                                        val cW = containerSize.width
-                                        val cH = containerSize.height
-                                        val bW = bgLiveBmp.width
-                                        val bH = bgLiveBmp.height
-
-                                        if (cW > 0 && cH > 0 && bW > 0 && bH > 0) {
-                                            val scale = minOf(cW.toFloat() / bW, cH.toFloat() / bH)
-                                            val rW = bW * scale
-                                            val rH = bH * scale
-                                            val left = (cW - rW) / 2f
-                                            val top = (cH - rH) / 2f
-
-                                            val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: bW
-                                            val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: bH
-
-                                            fun toReal(offset: Offset): Pair<Int, Int>? {
-                                                val relX = offset.x - left
-                                                val relY = offset.y - top
-                                                if (relX in 0f..rW && relY in 0f..rH) {
-                                                    val rx = ((relX / rW) * vW).toInt().coerceIn(0, vW - 1)
-                                                    val ry = ((relY / rH) * vH).toInt().coerceIn(0, vH - 1)
-                                                    return Pair(rx, ry)
-                                                }
-                                                return null
-                                            }
-
-                                            if (distance > 20f) {
-                                                val p1 = toReal(startOffset)
-                                                val p2 = toReal(lastOffset)
-                                                if (p1 != null && p2 != null) {
-                                                    CoroutineScope(Dispatchers.IO).launch {
-                                                        BackgroundDisplayManager.swipe(
-                                                            x1 = p1.first,
-                                                            y1 = p1.second,
-                                                            x2 = p2.first,
-                                                            y2 = p2.second,
-                                                            durationMs = durationMs,
-                                                        )
-                                                    }
-                                                }
-                                            } else {
-                                                val p = toReal(startOffset)
-                                                if (p != null) {
-                                                    touchFeedback = startOffset
-                                                    CoroutineScope(Dispatchers.IO).launch {
-                                                        BackgroundDisplayManager.tap(x = p.first, y = p.second)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        break
-                                    }
-                                }
-                            }
-                        },
+                        .backgroundDisplayTouchInput(
+                            isLive = bgIsLive,
+                            frame = bgLiveBmp,
+                            containerSize = { containerSize },
+                            onTapFeedback = { touchFeedback = it },
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
                     if (bgLiveBmp != null) {
