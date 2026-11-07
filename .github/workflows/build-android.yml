@@ -123,6 +123,12 @@ jobs:
           ./gradlew :app:assembleGithubDebug --no-daemon --max-workers=2
           ./gradlew :app:assembleGithubRelease --no-daemon --max-workers=2
 
+      - name: Unit tests (PR only)
+        if: github.event_name == 'pull_request'
+        run: |
+          cd src/android
+          ./gradlew :app:testGithubDebugUnitTest --no-daemon --max-workers=2
+
       - name: Rename, verify signature, and prepare APK artifacts
         run: |
           mkdir -p release-apks
