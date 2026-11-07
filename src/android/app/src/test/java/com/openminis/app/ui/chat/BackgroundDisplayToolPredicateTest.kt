@@ -68,6 +68,28 @@ class BackgroundDisplayToolPredicateTest {
         assertEquals("1", latestBackgroundDisplayCardId(floatingToolBarBlocks(messages)))
     }
 
+    @Test fun queuedUserBubbleDoesNotStartANewTurn() {
+        // AI 运行中用户插一句话（排队气泡）：本轮仍是插话前那一轮，后台屏卡不丢。
+        fun tool(id: String, cmd: String) = AssistantBlock(id = id, kind = "tool_use", toolName = "shell_execute",
+            toolArgs = """{"command":"$cmd"}""", toolStatus = ToolBlockStatus.RUNNING)
+        val messages = listOf(
+            ChatMessage(id = "u1", role = "user", content = "打开 App"),
+            ChatMessage(id = "a1", role = "assistant", content = "", toolBlocks = listOf(tool("1", "android-a11y-cli tap 1 2"))),
+            ChatMessage(id = "q1", role = "user", content = "顺便点一下关注", isQueued = true, queuedPromptId = "p1"),
+        )
+        assertEquals(1, currentTurnStartIndex(messages))
+        assertEquals("1", latestBackgroundDisplayCardId(currentTurnToolBarBlocks(messages)))
+        // 只带 queuedPromptId 也算排队
+        val onlyPromptId = messages.dropLast(1) + ChatMessage(id = "q2", role = "user", content = "x", queuedPromptId = "p2")
+        assertEquals("1", latestBackgroundDisplayCardId(currentTurnToolBarBlocks(onlyPromptId)))
+        // 排队消息被注入（不再排队）后就是新一轮
+        val sent = messages.dropLast(1) + ChatMessage(id = "u2", role = "user", content = "顺便点一下关注")
+        assertEquals(3, currentTurnStartIndex(sent))
+        assertNull(latestBackgroundDisplayCardId(currentTurnToolBarBlocks(sent)))
+        // 没有任何已发出的 user 消息：从头算
+        assertEquals(0, currentTurnStartIndex(listOf(messages[2])))
+    }
+
     @Test fun commandByPathStillCounts() {
         assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"/usr/local/bin/android-a11y-cli bg status"}""")))
     }
