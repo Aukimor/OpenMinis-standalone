@@ -22,16 +22,23 @@ class BackgroundDisplayToolPredicateTest {
         assertTrue(isBackgroundDisplayTool(block("shell_execute", """{"command":"python3 fast_douyin.py"}""")))
     }
 
-    @Test fun latestBackgroundDisplayCardIsTheNewestBgOrHelperCard() {
+    @Test fun latestBackgroundDisplayCardIsTheNewestBgCard() {
         val a11yOld = block("shell_execute", """{"command":"android-a11y-cli bg start x"}""", id = "1")
         val ls = block("shell_execute", """{"command":"ls"}""", id = "2")
         val a11yNew = block("shell_execute", """{"command":"android-a11y-cli tap 1 2"}""", id = "3")
         val browser = block("browser_use", """{"action":"screenshot"}""", id = "4")
         // 已经结束的 a11y 卡只要是最新一张后台屏卡就继续选中，后面的普通卡不影响
         assertEquals("3", latestBackgroundDisplayCardId(listOf(a11yOld, ls, a11yNew, browser)))
-        val helper = block(com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME, "{}", id = "5")
-        assertEquals("5", latestBackgroundDisplayCardId(listOf(a11yOld, a11yNew, helper)))
         assertNull(latestBackgroundDisplayCardId(listOf(ls, browser)))
+    }
+
+    @Test fun a11yCardFollowedByUnrelatedHelperSelectsTheA11yCard() {
+        // a11y 卡后跟一张无关 Helper（如网页调研）：仍选 a11y 卡，Helper 不按工具名入选。
+        // （Helper 只在子会话当前工具是后台屏工具时由缩略图自己判定显示预览。）
+        val a11y = block("shell_execute", """{"command":"android-a11y-cli tap 1 2"}""", id = "1")
+        val helper = block(com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME, """{"title":"网页调研"}""", id = "2")
+        assertEquals("1", latestBackgroundDisplayCardId(listOf(a11y, helper)))
+        assertNull(latestBackgroundDisplayCardId(listOf(helper)))
     }
 
     @Test fun ordinaryToolsAreNot() {

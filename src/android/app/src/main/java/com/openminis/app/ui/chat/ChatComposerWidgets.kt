@@ -529,14 +529,17 @@ private val BACKGROUND_DISPLAY_COMMAND_REGEX =
     Regex("""(?<![\w.-])(?:android-a11y-cli(?![\w.-])|fast_soda|fast_douyin)""")
 
 /**
- * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：本轮工具里「最新一张」后台屏工具卡
- * （[isBackgroundDisplayTool]）或子 Agent（Helper）卡。其他卡和更早的卡保持普通缩略图。
+ * 后台屏运行期间，哪张工具卡持续显示实时画面、点击打开接管：**本轮**工具里「最新一张」真正操作后台屏
+ * 的工具卡（[isBackgroundDisplayTool]）。其他卡和更早的卡保持普通缩略图。
  * 不要求这张卡正在运行：a11y 命令往往不到 1 秒就结束，只认「运行中」的话预览会一闪而过、接管入口点不到。
+ *
+ * Helper（子 Agent）卡不在这里按工具名入选——否则后台屏开着时，任何更晚的无关 Helper（如网页调研）
+ * 都会被换成后台屏画面、点开变接管弹窗，真正的 a11y 卡反而失去实时画面。Helper 仅当其子会话「当前工具」
+ * 本身就是后台屏工具时才显示预览，这个判断需要读子会话实时状态，放在 [ToolPreviewThumbnail] 里用
+ * [rememberChildLiveToolBlock] 完成。
  */
 internal fun latestBackgroundDisplayCardId(blocks: List<AssistantBlock>): String? =
-    blocks.lastOrNull {
-        isBackgroundDisplayTool(it) || it.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME
-    }?.id
+    blocks.lastOrNull { isBackgroundDisplayTool(it) }?.id
 
 /** The generic tool tile: the output tail, or the tool's icon while there is none. */
 @Composable
@@ -611,10 +614,19 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
     val (bgBitmap, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    // 后台屏运行期间，只有最新一张后台屏工具卡（含 Helper 卡）把缩略图换成实时画面、点击打开接管弹窗。
-    // 其他工具卡（更早的卡、浏览器 / 读图卡片等）保持原来的缩略图与点击行为；
+    // Helper 卡只在其子会话「当前工具」本身是后台屏工具时才算后台屏卡；无关 Helper（网页调研等）保持原样。
+    val helperChildOnBackgroundDisplay =
+        if (bgIsLive && punchThroughDepth == 0 && block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME) {
+            val childId = remember(block.content, block.toolStatus, block.toolTitle) { parseHelperBlock(block).childSessionId }
+            rememberChildLiveToolBlock(childId)?.let(::isBackgroundDisplayTool) == true
+        } else {
+            false
+        }
+    // 后台屏运行期间，只有本轮最新一张后台屏工具卡、或子会话正在操作后台屏的 Helper 卡，把缩略图换成实时画面、
+    // 点击打开接管弹窗。其他工具卡（更早的卡、无关 Helper、浏览器 / 读图卡片等）保持原来的缩略图与点击行为；
     // 后台屏结束后（bgIsLive = false）也不再拿残留的最后一帧来显示。
-    val showBgLivePreview = bgIsLive && bgBitmap != null && punchThroughDepth == 0 && isLatestBackgroundDisplayCard
+    val showBgLivePreview = bgIsLive && bgBitmap != null && punchThroughDepth == 0 &&
+        (isLatestBackgroundDisplayCard || helperChildOnBackgroundDisplay)
 
     val thumbnailShape = RoundedCornerShape(8.dp)
     // [T-android-agent-thumbnail-accent] A sub agent's tile is marked while
