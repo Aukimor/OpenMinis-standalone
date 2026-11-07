@@ -1051,6 +1051,7 @@ internal fun BackgroundDisplayLiveTouchCard(
     iconTint: Color = ChatColors.secondaryText,
 ) {
     val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
+    val isPaused by BackgroundDisplayManager.isPausedFlow.collectAsState()
     // 后台屏结束后不再展示残留的最后一帧
     if (!bgIsLive || bgLiveBmp == null) return
 
@@ -1106,83 +1107,75 @@ internal fun BackgroundDisplayLiveTouchCard(
                 }
             }
 
-            // Quick button to open full-screen takeover dialog
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF382BF0).copy(alpha = 0.22f))
-                    .border(1.dp, Color(0xFF6366F1).copy(alpha = 0.6f), RoundedCornerShape(6.dp))
-                    .clickable {
-                        BackgroundDisplayManager.openTakeoverDialog()
-                    }
-                    .padding(vertical = 7.dp),
-                contentAlignment = Alignment.Center,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("🔍 全屏接管操作", fontSize = 13.sp, color = Color(0xFF818CF8), fontWeight = FontWeight.SemiBold)
-            }
-
-            if (bgIsLive) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                // 1. 暂停
+                val pauseEnabled = isPauseButtonEnabled(bgIsLive, isPaused)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (pauseEnabled) Color(0xFF26262B) else Color(0xFF1E1E22))
+                        .clickable(enabled = pauseEnabled) {
+                            BackgroundDisplayManager.pause()
+                        }
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF26262B))
-                            .clickable {
-                                CoroutineScope(Dispatchers.IO).launch {
-                                    BackgroundDisplayManager.key(keyCode = KeyEvent.KEYCODE_BACK)
-                                }
-                            }
-                            .padding(vertical = 6.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("返回 (Back)", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
-                    }
+                    Text(
+                        "暂停",
+                        fontSize = 12.sp,
+                        color = if (pauseEnabled) Color.White else Color.White.copy(alpha = 0.35f),
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
 
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF26262B))
-                            .clickable {
-                                CoroutineScope(Dispatchers.IO).launch {
-                                    val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
-                                    val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
-                                    BackgroundDisplayManager.swipe(
-                                        x1 = vW / 2,
-                                        y1 = (vH * 0.75).toInt(),
-                                        x2 = vW / 2,
-                                        y2 = (vH * 0.2).toInt(),
-                                        durationMs = 250,
-                                    )
-                                }
-                            }
-                            .padding(vertical = 6.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("上滑 (Swipe Up)", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
-                    }
+                // 2. 继续
+                val resumeEnabled = isResumeButtonEnabled(bgIsLive, isPaused)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (resumeEnabled) Color(0xFF26262B) else Color(0xFF1E1E22))
+                        .clickable(enabled = resumeEnabled) {
+                            BackgroundDisplayManager.resume()
+                        }
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "继续",
+                        fontSize = 12.sp,
+                        color = if (resumeEnabled) Color(0xFF4ADE80) else Color.White.copy(alpha = 0.35f),
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
 
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF381E20))
-                            .clickable {
-                                CoroutineScope(Dispatchers.IO).launch {
-                                    BackgroundDisplayManager.stopSession(killPackages = false)
-                                }
-                            }
-                            .padding(vertical = 6.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("关闭后台屏 (Stop)", fontSize = 12.sp, color = Color(0xFFFF6B6B), fontWeight = FontWeight.Medium)
-                    }
+                // 3. 全屏
+                val fsEnabled = isFullscreenButtonEnabled(bgIsLive)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (fsEnabled) Color(0xFF382BF0).copy(alpha = 0.35f) else Color(0xFF1E1E22))
+                        .clickable(enabled = fsEnabled) {
+                            BackgroundDisplayManager.openTakeoverDialog()
+                        }
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "全屏",
+                        fontSize = 12.sp,
+                        color = if (fsEnabled) Color(0xFF818CF8) else Color.White.copy(alpha = 0.35f),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
                 }
             }
         }
@@ -1193,7 +1186,12 @@ internal fun BackgroundDisplayLiveTouchCard(
 internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
     val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
     val activeDisplayId = BackgroundDisplayManager.activeDisplayId
-    val takeoverState = backgroundDisplayTakeoverState(isLive = bgIsLive, hasFrame = bgLiveBmp != null)
+    val isPaused by BackgroundDisplayManager.isPausedFlow.collectAsState()
+    val takeoverState = backgroundDisplayTakeoverState(
+        isLive = bgIsLive,
+        hasFrame = bgLiveBmp != null,
+        isPaused = isPaused,
+    )
     val controlsEnabled = backgroundDisplayControlsEnabled(takeoverState)
     val context = LocalContext.current
 
@@ -1323,8 +1321,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                     }
                 }
 
-                // Bottom Control Buttons Row: ◁ 返回、↑ 上滑视频、↓ 下滑、✕ 停止后台屏
-                // 后台屏停止后按钮变灰且不可点（之前停止后仍可点，但点了没有任何效果）。
+                // Bottom Control Buttons Row: 暂停、继续、前台
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1333,85 +1330,73 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // 1. 暂停
+                    val pauseEnabled = controlsEnabled && isPauseButtonEnabled(bgIsLive, isPaused)
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF26262F))
-                            .clickable(enabled = controlsEnabled) {
-                                sendBackgroundDisplayAction(context) {
-                                    BackgroundDisplayManager.key(keyCode = KeyEvent.KEYCODE_BACK)
-                                }
+                            .background(if (pauseEnabled) Color(0xFF26262F) else Color(0xFF1E1E22))
+                            .clickable(enabled = pauseEnabled) {
+                                BackgroundDisplayManager.pause()
                             }
                             .padding(vertical = 10.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("◁ 返回", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                        Text(
+                            "暂停",
+                            fontSize = 12.sp,
+                            color = if (pauseEnabled) Color.White else Color.White.copy(alpha = 0.35f),
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                        )
                     }
 
+                    // 2. 继续
+                    val resumeEnabled = controlsEnabled && isResumeButtonEnabled(bgIsLive, isPaused)
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF26262F))
-                            .clickable(enabled = controlsEnabled) {
-                                sendBackgroundDisplayAction(context) {
-                                    val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
-                                    val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
-                                    BackgroundDisplayManager.swipe(
-                                        x1 = vW / 2,
-                                        y1 = (vH * 0.75).toInt(),
-                                        x2 = vW / 2,
-                                        y2 = (vH * 0.2).toInt(),
-                                        durationMs = 250,
-                                    )
-                                }
+                            .background(if (resumeEnabled) Color(0xFF26262F) else Color(0xFF1E1E22))
+                            .clickable(enabled = resumeEnabled) {
+                                BackgroundDisplayManager.resume()
                             }
                             .padding(vertical = 10.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("↑ 上滑视频", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
+                        Text(
+                            "继续",
+                            fontSize = 12.sp,
+                            color = if (resumeEnabled) Color(0xFF4ADE80) else Color.White.copy(alpha = 0.35f),
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                        )
                     }
 
+                    // 3. 前台
+                    val fgEnabled = controlsEnabled && isForegroundButtonEnabled(bgIsLive)
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF26262F))
-                            .clickable(enabled = controlsEnabled) {
-                                sendBackgroundDisplayAction(context) {
-                                    val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
-                                    val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
-                                    BackgroundDisplayManager.swipe(
-                                        x1 = vW / 2,
-                                        y1 = (vH * 0.2).toInt(),
-                                        x2 = vW / 2,
-                                        y2 = (vH * 0.75).toInt(),
-                                        durationMs = 250,
-                                    )
-                                }
-                            }
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text("↓ 下滑", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Medium)
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .weight(1.1f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF3D1B1E))
-                            .clickable(enabled = controlsEnabled) {
-                                CoroutineScope(Dispatchers.IO).launch {
-                                    BackgroundDisplayManager.stopSession(killPackages = false)
-                                }
+                            .background(if (fgEnabled) Color(0xFF382BF0).copy(alpha = 0.35f) else Color(0xFF1E1E22))
+                            .clickable(enabled = fgEnabled) {
                                 onDismiss()
+                                CoroutineScope(Dispatchers.IO).launch {
+                                    BackgroundDisplayManager.switchToForeground(context)
+                                }
                             }
                             .padding(vertical = 10.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("✕ 停止后台屏", fontSize = 12.sp, color = Color(0xFFFF6B6B), fontWeight = FontWeight.Medium)
+                        Text(
+                            "前台",
+                            fontSize = 12.sp,
+                            color = if (fgEnabled) Color(0xFF818CF8) else Color.White.copy(alpha = 0.35f),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                        )
                     }
                 }
             }
