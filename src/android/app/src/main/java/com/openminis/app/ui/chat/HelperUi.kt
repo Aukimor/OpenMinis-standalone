@@ -993,7 +993,8 @@ internal fun BackgroundDisplayLiveTouchCard(
     iconTint: Color = ChatColors.secondaryText,
 ) {
     val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    if (bgLiveBmp == null) return
+    // 后台屏结束后不再展示残留的最后一帧
+    if (!bgIsLive || bgLiveBmp == null) return
 
     val bgTitle = if (bgIsLive) {
         "后台虚拟屏直播 (Display #${BackgroundDisplayManager.activeDisplayId})"
@@ -1652,7 +1653,7 @@ internal fun HelperDetailContent(block: AssistantBlock) {
             }
         }
         val (bgBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-        if (bgBmp != null) {
+        if (bgIsLive && bgBmp != null) {
             BackgroundDisplayLiveTouchCard(iconTint = accent)
         }
         taskArgs?.let { SubAgentTaskCard(it) }

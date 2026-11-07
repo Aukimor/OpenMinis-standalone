@@ -491,8 +491,8 @@ internal fun ToolDetailSheet(
                         // output), and we don't want a stuck HUD there.
                         val sheetMonitor = rememberSystemResourceMonitor(active = isLive)
                         val (bgBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-                        val showBgCardInShell = bgBmp != null && (
-                            bgIsLive ||
+                        // 只在后台屏仍在运行时显示；结束后不再展示残留的最后一帧。
+                        val showBgCardInShell = bgIsLive && bgBmp != null && (
                             block.toolArgs.contains("android-a11y") ||
                             block.toolArgs.contains("fast_soda") ||
                             block.toolArgs.contains("fast_douyin") ||

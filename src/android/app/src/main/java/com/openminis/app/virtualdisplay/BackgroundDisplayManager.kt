@@ -295,12 +295,16 @@ object BackgroundDisplayManager {
         synchronized(frameLock) {
             latestBitmap?.recycle()
             latestBitmap = null
-            // Note: lastUiPreviewBitmap is retained so UI/Compose can continue
-            // showing the last frame safely without throwing recycled bitmap exceptions.
+            // 会话结束后不再保留最后一帧给界面显示（否则停止后旧画面一直残留）。
+            // 这里只丢引用、不 recycle：界面可能还拿着这张位图在画，recycle 会抛异常；交给 GC 回收。
+            lastUiPreviewBitmap = null
         }
+        frameVersionFlow.value = System.currentTimeMillis()
     }
 
     fun getUiPreviewBitmap(): Bitmap? {
+        // 没有正在运行的后台屏就没有预览（不再返回会话结束前的最后一帧）
+        if (activeDisplayId < 0) return null
         synchronized(frameLock) {
             val preview = lastUiPreviewBitmap
             if (preview != null && !preview.isRecycled) {
