@@ -32,4 +32,14 @@ class BackgroundDisplayTakeoverStateTest {
         assertNotNull(backgroundDisplayTakeoverPlaceholder(BackgroundDisplayTakeoverState.WAITING))
         assertEquals("后台屏已停止", backgroundDisplayTakeoverPlaceholder(BackgroundDisplayTakeoverState.STOPPED))
     }
+
+    @Test fun failedActionsAreReportedAndThrottled() {
+        assertNull(backgroundDisplayActionFailureMessage(delivered = true, stillLive = true))
+        assertNull(backgroundDisplayActionFailureMessage(delivered = true, stillLive = false))
+        assertTrue(backgroundDisplayActionFailureMessage(delivered = false, stillLive = false)!!.contains("已停止"))
+        assertTrue(backgroundDisplayActionFailureMessage(delivered = false, stillLive = true)!!.contains("没送达"))
+        assertTrue(shouldShowBackgroundDisplayFailure(lastShownAtMs = 0L, nowMs = 1_000L))
+        assertFalse(shouldShowBackgroundDisplayFailure(lastShownAtMs = 10_000L, nowMs = 11_000L))
+        assertTrue(shouldShowBackgroundDisplayFailure(lastShownAtMs = 10_000L, nowMs = 12_000L))
+    }
 }

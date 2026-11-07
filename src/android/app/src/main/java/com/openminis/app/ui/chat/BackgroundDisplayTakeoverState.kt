@@ -43,3 +43,18 @@ internal fun backgroundDisplayTakeoverPlaceholder(state: BackgroundDisplayTakeov
 /** 底部按钮（返回 / 上滑 / 下滑 / 停止）只在后台屏运行时可用。 */
 internal fun backgroundDisplayControlsEnabled(state: BackgroundDisplayTakeoverState): Boolean =
     state != BackgroundDisplayTakeoverState.STOPPED
+
+/**
+ * 接管时一次点击 / 滑动 / 按键没送达后台屏，给用户看的提示；送达了返回 null。
+ * [stillLive] 是失败那一刻后台屏是否还在运行：已停止和「在运行但没送达」是两种不同的情况。
+ */
+internal fun backgroundDisplayActionFailureMessage(delivered: Boolean, stillLive: Boolean): String? =
+    when {
+        delivered -> null
+        !stillLive -> "后台屏已停止，这次操作没有发出"
+        else -> "操作没送达后台屏（Shizuku 可能断开，或后台 App 无响应），请稍后再试"
+    }
+
+/** 失败提示限流：距上次提示不足 [minIntervalMs] 就不再弹，避免连续滑动时刷屏。 */
+internal fun shouldShowBackgroundDisplayFailure(lastShownAtMs: Long, nowMs: Long, minIntervalMs: Long = 2_000L): Boolean =
+    lastShownAtMs <= 0L || nowMs - lastShownAtMs >= minIntervalMs

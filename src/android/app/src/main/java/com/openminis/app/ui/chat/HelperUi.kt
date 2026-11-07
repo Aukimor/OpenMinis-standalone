@@ -888,6 +888,29 @@ internal fun AgentDetailCard(
     }
 }
 
+@Volatile private var lastBackgroundDisplayFailureToastAt = 0L
+
+/**
+ * 在 IO 线程把一次接管操作（点击 / 滑动 / 按键）发给后台屏；没送达时弹一条简短提示
+ * （之前失败是静默的，用户只看到「点了没反应」）。提示文字与限流见 [backgroundDisplayActionFailureMessage]。
+ */
+private fun sendBackgroundDisplayAction(context: android.content.Context, action: () -> Boolean) {
+    val appContext = context.applicationContext
+    CoroutineScope(Dispatchers.IO).launch {
+        val delivered = runCatching(action).getOrDefault(false)
+        val message = backgroundDisplayActionFailureMessage(
+            delivered = delivered,
+            stillLive = BackgroundDisplayManager.activeDisplayId >= 0,
+        ) ?: return@launch
+        val now = System.currentTimeMillis()
+        if (!shouldShowBackgroundDisplayFailure(lastBackgroundDisplayFailureToastAt, now)) return@launch
+        lastBackgroundDisplayFailureToastAt = now
+        kotlinx.coroutines.withContext(Dispatchers.Main) {
+            android.widget.Toast.makeText(appContext, message, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
 /**
  * 后台虚拟屏预览上的点击 / 滑动转发（预览卡片与全屏接管弹窗共用）。
  *
@@ -907,6 +930,7 @@ private fun Modifier.backgroundDisplayTouchInput(
     )
     val latestContainerSize = rememberUpdatedState(containerSize)
     val latestOnTapFeedback = rememberUpdatedState(onTapFeedback)
+    val context = LocalContext.current
     return pointerInput(isLive) {
         if (!isLive) return@pointerInput
         awaitEachGesture {
@@ -961,7 +985,7 @@ private fun Modifier.backgroundDisplayTouchInput(
                             val p1 = toReal(startOffset)
                             val p2 = toReal(lastOffset)
                             if (p1 != null && p2 != null) {
-                                CoroutineScope(Dispatchers.IO).launch {
+                                sendBackgroundDisplayAction(context) {
                                     BackgroundDisplayManager.swipe(
                                         x1 = p1.first,
                                         y1 = p1.second,
@@ -975,7 +999,7 @@ private fun Modifier.backgroundDisplayTouchInput(
                             val p = toReal(startOffset)
                             if (p != null) {
                                 latestOnTapFeedback.value(startOffset)
-                                CoroutineScope(Dispatchers.IO).launch {
+                                sendBackgroundDisplayAction(context) {
                                     BackgroundDisplayManager.tap(x = p.first, y = p.second)
                                 }
                             }
@@ -1138,6 +1162,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
     val activeDisplayId = BackgroundDisplayManager.activeDisplayId
     val takeoverState = backgroundDisplayTakeoverState(isLive = bgIsLive, hasFrame = bgLiveBmp != null)
     val controlsEnabled = backgroundDisplayControlsEnabled(takeoverState)
+    val context = LocalContext.current
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -1276,7 +1301,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
                             .clickable(enabled = controlsEnabled) {
-                                CoroutineScope(Dispatchers.IO).launch {
+                                sendBackgroundDisplayAction(context) {
                                     BackgroundDisplayManager.key(keyCode = KeyEvent.KEYCODE_BACK)
                                 }
                             }
@@ -1292,7 +1317,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
                             .clickable(enabled = controlsEnabled) {
-                                CoroutineScope(Dispatchers.IO).launch {
+                                sendBackgroundDisplayAction(context) {
                                     val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
                                     val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
                                     BackgroundDisplayManager.swipe(
@@ -1316,7 +1341,7 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF26262F))
                             .clickable(enabled = controlsEnabled) {
-                                CoroutineScope(Dispatchers.IO).launch {
+                                sendBackgroundDisplayAction(context) {
                                     val vW = BackgroundDisplayManager.activeDisplayWidth.takeIf { it > 0 } ?: 1080
                                     val vH = BackgroundDisplayManager.activeDisplayHeight.takeIf { it > 0 } ?: 2400
                                     BackgroundDisplayManager.swipe(
