@@ -96,6 +96,9 @@ object BackgroundDisplayManager {
             override fun onServiceDisconnected(name: ComponentName?) {
                 AppLogger.warning(TAG, "IBackgroundDisplayService disconnected")
                 displayService = null
+                // 在主线程回调里不去抢 stopSession/startSession 的锁（startSession 持锁时正等主线程上的
+                // onServiceConnected），放到后台线程做本地清理。
+                Thread({ onServiceLost() }, "minis-bg-display-lost").apply { isDaemon = true }.start()
             }
         }
 
@@ -281,6 +284,14 @@ object BackgroundDisplayManager {
             }
         }
 
+        releaseLocalState()
+    }
+
+    /**
+     * 只清本进程这边的状态（不碰 Shizuku 服务）：停止自动路由、关掉 ImageReader 和渲染线程、丢弃画面。
+     * stopSession 与「服务意外断开」共用。
+     */
+    private fun releaseLocalState() {
         activeDisplayId = -1
         activeDisplayIdFlow.value = -1
         autoRouteA11y = false
@@ -300,6 +311,17 @@ object BackgroundDisplayManager {
             lastUiPreviewBitmap = null
         }
         frameVersionFlow.value = System.currentTimeMillis()
+    }
+
+    /** 服务进程意外断开：服务那边的虚拟屏已随之消失，本地也要一起清掉，否则会一直以为后台屏还在。 */
+    @Synchronized
+    private fun onServiceLost() {
+        // 断开后如果已经重新绑定并开始了新的会话，就不要误清
+        if (displayService != null) return
+        if (activeDisplayId >= 0 || imageReader != null) {
+            AppLogger.warning(TAG, "Background display service lost; clearing local session state")
+            releaseLocalState()
+        }
     }
 
     fun getUiPreviewBitmap(): Bitmap? {
