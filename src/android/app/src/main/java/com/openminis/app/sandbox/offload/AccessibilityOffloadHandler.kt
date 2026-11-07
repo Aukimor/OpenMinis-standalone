@@ -82,7 +82,7 @@ Use --compact to emit on a single line; --quiet to strip the envelope.
 
 First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
 """
-        private const val BG_HELP = "bg start <package> [--width W] [--height H] [--dpi D] [--unmute] [--force] | bg launch <package> | bg status | bg stop [--kill]\n"
+        private const val BG_HELP = "bg start <package> [--width W] [--height H] [--dpi D] [--unmute] [--force] | bg launch <package> | bg status | bg pause | bg resume | bg foreground | bg stop [--kill]\n"
         private const val SERVICE_HELP = "service status | ping\n"
         private const val UI_HELP = """ui dump | find | info | node | screenshot
 
@@ -213,6 +213,24 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
         com.openminis.app.service.SessionActivityTracker.updateToolStatus(
             statusForSubAction(sub, args.positional.getOrNull(1), args),
         )
+        if (sub != "bg" && sub != "service") {
+            val targetDisplay = resolveTargetDisplayId(args)
+            if (targetDisplay != Display.DEFAULT_DISPLAY && targetDisplay == BackgroundDisplayManager.activeDisplayId) {
+                if (!BackgroundDisplayManager.awaitIfPaused()) {
+                    return NativeOffloadResult(
+                        1,
+                        JSONObject().put("ok", false).put("error", "Background display stopped or handed over to foreground while paused").toString(),
+                    )
+                }
+            }
+            val isExplicitFg = args.hasFlag("fg", "main-display") || args.getInt("display") == Display.DEFAULT_DISPLAY
+            if (!isExplicitFg && BackgroundDisplayManager.handedOverToForeground && BackgroundDisplayManager.activeDisplayId < 0) {
+                return NativeOffloadResult(
+                    1,
+                    JSONObject().put("ok", false).put("error", "Background display was switched to foreground by user").toString(),
+                )
+            }
+        }
         return try {
             when (sub) {
                 // [T-android-a11y-helper-mount] Resolve screenshots against the
@@ -307,11 +325,32 @@ First-run: enable "Minis" under Settings → Accessibility, then `service ping`.
                 ok(args, JSONObject().put("displayId", res.displayId).put("packageName", pkg).put("message", res.message))
             }
             "status" -> ok(args, BackgroundDisplayManager.status())
+            "pause" -> {
+                BackgroundDisplayManager.pause()
+                ok(args, JSONObject().put("isPaused", true).put("displayId", BackgroundDisplayManager.activeDisplayId))
+            }
+            "resume" -> {
+                BackgroundDisplayManager.resume()
+                ok(args, JSONObject().put("isPaused", false).put("displayId", BackgroundDisplayManager.activeDisplayId))
+            }
+            "foreground" -> {
+                val switched = BackgroundDisplayManager.switchToForeground(context)
+                ok(args, JSONObject().put("switchedToForeground", switched))
+            }
             "stop" -> {
                 val prevId = BackgroundDisplayManager.activeDisplayId
+                val handedOver = BackgroundDisplayManager.handedOverToForeground
                 val kill = args.hasFlag("kill")
                 BackgroundDisplayManager.stopSession(killPackages = kill)
-                ok(args, JSONObject().put("stoppedDisplayId", prevId).put("killed", kill))
+                ok(args, JSONObject()
+                    .put("stoppedDisplayId", prevId)
+                    .put("killed", kill && !handedOver)
+                    .apply {
+                        if (handedOver) {
+                            put("handedOverToForeground", true)
+                            put("message", "App was handed over to foreground; force-stop skipped")
+                        }
+                    })
             }
             else -> NativeOffloadResult(2, "$TOOL bg: unknown action\n$BG_HELP")
         }

@@ -7,12 +7,17 @@ package com.openminis.app.ui.chat
  * - [LIVE]：后台屏在运行且有画面，用户的点击 / 滑动会直接作用到后台屏。
  * - [STOPPED]：后台屏已经停止（AI 结束、用户停止、或 Shizuku 断开），没有可接管的画面。
  */
-internal enum class BackgroundDisplayTakeoverState { WAITING, LIVE, STOPPED }
+internal enum class BackgroundDisplayTakeoverState { WAITING, LIVE, PAUSED, STOPPED }
 
-internal fun backgroundDisplayTakeoverState(isLive: Boolean, hasFrame: Boolean): BackgroundDisplayTakeoverState =
+internal fun backgroundDisplayTakeoverState(
+    isLive: Boolean,
+    hasFrame: Boolean,
+    isPaused: Boolean = false,
+): BackgroundDisplayTakeoverState =
     when {
         !isLive -> BackgroundDisplayTakeoverState.STOPPED
         !hasFrame -> BackgroundDisplayTakeoverState.WAITING
+        isPaused -> BackgroundDisplayTakeoverState.PAUSED
         else -> BackgroundDisplayTakeoverState.LIVE
     }
 
@@ -20,6 +25,7 @@ internal fun backgroundDisplayTakeoverState(isLive: Boolean, hasFrame: Boolean):
 internal fun backgroundDisplayTakeoverTitle(state: BackgroundDisplayTakeoverState, displayId: Int): String =
     when (state) {
         BackgroundDisplayTakeoverState.LIVE -> "📱 你正在接管后台屏 (Display #$displayId)"
+        BackgroundDisplayTakeoverState.PAUSED -> "📱 后台屏已暂停 (Display #$displayId)"
         BackgroundDisplayTakeoverState.WAITING -> "📱 后台屏启动中 (Display #$displayId)"
         BackgroundDisplayTakeoverState.STOPPED -> "📱 后台屏已停止"
     }
@@ -28,6 +34,7 @@ internal fun backgroundDisplayTakeoverTitle(state: BackgroundDisplayTakeoverStat
 internal fun backgroundDisplayTakeoverHint(state: BackgroundDisplayTakeoverState): String =
     when (state) {
         BackgroundDisplayTakeoverState.LIVE -> "点击 / 滑动画面直接操作后台屏；AI 也可能同时在操作。关闭窗口即退出接管，AI 继续在后台运行。"
+        BackgroundDisplayTakeoverState.PAUSED -> "后台屏已暂停，AI 指令已挂起；你仍可触控画面。点击「继续」恢复 AI 运行。"
         BackgroundDisplayTakeoverState.WAITING -> "正在等待后台屏的第一帧画面…"
         BackgroundDisplayTakeoverState.STOPPED -> "后台屏已经结束（AI 完成、被停止或 Shizuku 断开），没有可接管的画面。可以关闭窗口。"
     }
@@ -35,14 +42,31 @@ internal fun backgroundDisplayTakeoverHint(state: BackgroundDisplayTakeoverState
 /** 画面区没有图像时的占位文字（[LIVE] 时有画面，不显示占位）。 */
 internal fun backgroundDisplayTakeoverPlaceholder(state: BackgroundDisplayTakeoverState): String? =
     when (state) {
-        BackgroundDisplayTakeoverState.LIVE -> null
+        BackgroundDisplayTakeoverState.LIVE,
+        BackgroundDisplayTakeoverState.PAUSED -> null
         BackgroundDisplayTakeoverState.WAITING -> "正在等待后台画面…"
         BackgroundDisplayTakeoverState.STOPPED -> "后台屏已停止"
     }
 
-/** 底部按钮（返回 / 上滑 / 下滑 / 停止）只在后台屏运行时可用。 */
+/** 底部按钮只在后台屏运行时可用。 */
 internal fun backgroundDisplayControlsEnabled(state: BackgroundDisplayTakeoverState): Boolean =
     state != BackgroundDisplayTakeoverState.STOPPED
+
+/** 「暂停」按钮是否可用：只有在运行中（且未暂停）时可用。 */
+internal fun isPauseButtonEnabled(isLive: Boolean, isPaused: Boolean): Boolean =
+    isLive && !isPaused
+
+/** 「继续」按钮是否可用：只有在已暂停时可用。 */
+internal fun isResumeButtonEnabled(isLive: Boolean, isPaused: Boolean): Boolean =
+    isLive && isPaused
+
+/** 「前台」按钮是否可用：在后台屏运行时可用。 */
+internal fun isForegroundButtonEnabled(isLive: Boolean): Boolean =
+    isLive
+
+/** 「全屏」按钮是否可用：在后台屏运行时可用。 */
+internal fun isFullscreenButtonEnabled(isLive: Boolean): Boolean =
+    isLive
 
 /**
  * 接管时一次点击 / 滑动 / 按键没送达后台屏，给用户看的提示；送达了返回 null。

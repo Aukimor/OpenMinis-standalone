@@ -56,6 +56,115 @@ object BackgroundDisplayManager {
     }
 
     @Volatile
+    var isPaused: Boolean = false
+        private set
+
+    val isPausedFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    @Volatile
+    var handedOverToForeground: Boolean = false
+        private set
+
+    private val pauseLock = Any()
+
+    fun pause() {
+        if (activeDisplayId < 0) return
+        isPaused = true
+        isPausedFlow.value = true
+        AppLogger.info(TAG, "Background display paused by user")
+    }
+
+    fun resume() {
+        isPaused = false
+        isPausedFlow.value = false
+        synchronized(pauseLock) {
+            (pauseLock as java.lang.Object).notifyAll()
+        }
+        AppLogger.info(TAG, "Background display resumed")
+    }
+
+    /**
+     * AI 操作挂起等待机制：当 isPaused == true 且 activeDisplayId >= 0 时，AI 发起的操作等待。
+     * 每 100ms 检查一次，直到 !isPaused 或 activeDisplayId < 0 或超时。
+     * 用户 UI 手动触控绝不调用此方法。
+     * @return true 如果正常恢复（未超时且仍在运行），false 如果虚拟屏已停止/切到前台/超时。
+     */
+    fun awaitIfPaused(timeoutMs: Long = 60_000L): Boolean {
+        if (!isPaused || activeDisplayId < 0) return activeDisplayId >= 0
+        val start = System.currentTimeMillis()
+        while (isPaused && activeDisplayId >= 0) {
+            val elapsed = System.currentTimeMillis() - start
+            if (elapsed >= timeoutMs) {
+                AppLogger.warning(TAG, "awaitIfPaused timed out after ${elapsed}ms")
+                return false
+            }
+            try {
+                synchronized(pauseLock) {
+                    val waitTime = (timeoutMs - elapsed).coerceAtMost(100L)
+                    if (waitTime > 0 && isPaused && activeDisplayId >= 0) {
+                        (pauseLock as java.lang.Object).wait(waitTime)
+                    }
+                }
+            } catch (ie: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+        }
+        return activeDisplayId >= 0
+    }
+
+    /**
+     * 切换到前台：将当前后台屏 App 切换到手机主屏幕（Display 0）最前台。
+     * 记录 handedOverToForeground = true，解除暂停，关闭弹窗，
+     * 不杀死目标 App，不执行 settleBehind，释放虚拟屏后在主屏启动目标 App。
+     */
+    @Synchronized
+    fun switchToForeground(context: Context): Boolean {
+        val pkg = currentPackageName
+        if (pkg.isBlank() && activeDisplayId < 0) return false
+
+        handedOverToForeground = true
+        resume()
+        closeTakeoverDialog()
+
+        val dId = activeDisplayId
+        if (dId >= 0) {
+            runCatching {
+                // 不执行 settleBehind，直接释放虚拟屏
+                displayService?.releaseAll()
+            }
+        }
+        launchedPackages.clear()
+        releaseLocalState()
+
+        if (pkg.isNotBlank()) {
+            AppLogger.info(TAG, "Switching $pkg to foreground on Display 0")
+            val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg)?.apply {
+                addFlags(
+                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK or
+                    android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    android.content.Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                )
+            }
+            val started = launchIntent != null && runCatching {
+                context.startActivity(launchIntent)
+                true
+            }.getOrDefault(false)
+
+            if (!started) {
+                val comp = launchIntent?.component?.flattenToShortString()
+                val cmd = if (comp != null) {
+                    arrayOf("am", "start", "--display", "0", "-n", comp)
+                } else {
+                    arrayOf("monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
+                }
+                ShizukuManager.runProcess(cmd)
+            }
+        }
+        return true
+    }
+
+    @Volatile
     private var displayService: IBackgroundDisplayService? = null
     private var imageReader: ImageReader? = null
     private var renderThread: HandlerThread? = null
@@ -157,6 +266,9 @@ object BackgroundDisplayManager {
     ): SessionResult {
         stopSession(killPackages = false)
         appContext = context.applicationContext
+        handedOverToForeground = false
+        isPaused = false
+        isPausedFlow.value = false
 
         val serviceReady = ensureServiceBound(context)
         if (!serviceReady || displayService == null) {
@@ -302,17 +414,22 @@ object BackgroundDisplayManager {
 
     @Synchronized
     fun stopSession(killPackages: Boolean = false) {
-        val dId = activeDisplayId
-        if (dId >= 0) {
-            runCatching {
-                if (!killPackages) {
-                    displayService?.settleBehind(dId)
-                } else {
-                    // 失败也不能挡住下面的 releaseAll
-                    runCatching { forceStopDisplayPackages(dId) }
-                }
-                displayService?.releaseAll()
+        if (activeDisplayId < 0) {
+            if (handedOverToForeground) {
+                AppLogger.info(TAG, "stopSession: virtual display already stopped, handed over to foreground (kill ignored)")
             }
+            return
+        }
+        val dId = activeDisplayId
+        resume()
+        runCatching {
+            if (!killPackages || handedOverToForeground) {
+                displayService?.settleBehind(dId)
+            } else {
+                // 失败也不能挡住下面的 releaseAll
+                runCatching { forceStopDisplayPackages(dId) }
+            }
+            displayService?.releaseAll()
         }
         launchedPackages.clear()
 
@@ -325,6 +442,10 @@ object BackgroundDisplayManager {
      * 用已有的 `am force-stop`（Shizuku，UID 2000），不碰 OpenMinis 自己和系统包。
      */
     private fun forceStopDisplayPackages(displayId: Int) {
+        if (handedOverToForeground) {
+            AppLogger.info(TAG, "forceStopDisplayPackages: skipped because handedOverToForeground is true")
+            return
+        }
         val top = runCatching { displayService?.topActivity(displayId) }.getOrNull()
         val candidates = synchronized(launchedPackages) { launchedPackages.toList() } + listOfNotNull(top)
         val ctx = appContext
@@ -494,6 +615,8 @@ object BackgroundDisplayManager {
             put("autoRouteA11y", autoRouteA11y)
             put("serviceBound", bound)
             put("hasFrame", latestBitmap != null)
+            put("isPaused", isPaused)
+            put("handedOverToForeground", handedOverToForeground)
             if (activeDisplayId >= 0 && bound) {
                 put("topTaskId", runCatching { svc!!.topTaskId(activeDisplayId) }.getOrDefault(-1))
                 put("topActivity", runCatching { svc!!.topActivity(activeDisplayId) }.getOrNull() ?: "")
