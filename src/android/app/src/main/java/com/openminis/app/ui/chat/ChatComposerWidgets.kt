@@ -507,6 +507,13 @@ internal fun rememberChildLiveToolBlock(childSessionId: String?): AssistantBlock
 }
 
 /** The generic tool tile: the output tail, or the tool's icon while there is none. */
+/**
+ * 这条工具是不是在操作后台虚拟屏：shell_execute 且命令里调用了 android-a11y-cli。
+ * 只有这种工具卡在运行时才显示后台屏预览 / 点击接管（其余工具卡保持原样）。
+ */
+internal fun isBackgroundDisplayTool(block: AssistantBlock): Boolean =
+    block.toolName == "shell_execute" && block.toolArgs.contains("android-a11y-cli")
+
 @Composable
 private fun GenericThumbContent(block: AssistantBlock, toolAccent: Color) {
     if (block.content.isNotEmpty()) {
@@ -574,11 +581,10 @@ private fun ToolPreviewThumbnail(
         block.toolStatus == ToolBlockStatus.PENDING
     val resourceMonitor = rememberSystemResourceMonitor(active = isShellTool && isLive)
     val (bgBitmap, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    val showBgLivePreview = bgBitmap != null && block.toolName != "browser_use" && block.toolName != "read_image" && (
-        bgIsLive ||
-        block.toolName == com.openminis.app.agent.jobs.HelperRunner.TOOL_NAME ||
-        (block.toolName == "shell_execute" && (block.toolArgs.contains("android-a11y") || block.toolArgs.contains("bg ") || block.content.contains("android-a11y") || isLive))
-    )
+    // 只有「正在运行、且确实在操作后台虚拟屏」的那条工具才把缩略图换成后台屏画面、点击才打开接管弹窗。
+    // 其他工具卡（包括历史消息里的卡片、浏览器 / 读图卡片）保持原来的缩略图与点击行为；
+    // 后台屏结束后（bgIsLive = false）也不再拿残留的最后一帧来显示。
+    val showBgLivePreview = bgIsLive && bgBitmap != null && isLive && isBackgroundDisplayTool(block)
 
     val thumbnailShape = RoundedCornerShape(8.dp)
     // [T-android-agent-thumbnail-accent] A sub agent's tile is marked while
