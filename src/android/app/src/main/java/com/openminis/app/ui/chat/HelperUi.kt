@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -1185,7 +1186,6 @@ internal fun BackgroundDisplayLiveTouchCard(
 @Composable
 internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
     val (bgLiveBmp, bgIsLive) = rememberBackgroundDisplayLiveSnapshot()
-    val activeDisplayId = BackgroundDisplayManager.activeDisplayId
     val isPaused by BackgroundDisplayManager.isPausedFlow.collectAsState()
     val takeoverState = backgroundDisplayTakeoverState(
         isLive = bgIsLive,
@@ -1197,207 +1197,197 @@ internal fun BackgroundDisplayTakeoverDialog(onDismiss: () -> Unit) {
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
     ) {
-        val configuration = LocalConfiguration.current
-        val screenWidth = configuration.screenWidthDp.dp
-        val screenHeight = configuration.screenHeightDp.dp
+        var containerSize by remember { mutableStateOf(IntSize.Zero) }
+        var touchFeedback by remember { mutableStateOf<Offset?>(null) }
+
+        LaunchedEffect(touchFeedback) {
+            if (touchFeedback != null) {
+                delay(400)
+                touchFeedback = null
+            }
+        }
 
         Box(
             modifier = Modifier
-                .width(screenWidth * 0.92f)
-                .height(screenHeight * 0.82f)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF141418))
-                .border(1.dp, Color(0xFF33333F), RoundedCornerShape(16.dp))
-                .padding(12.dp),
+                .fillMaxSize()
+                .background(Color.Black),
         ) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            // 1. 底层：虚拟屏全屏画面与手势触控
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { containerSize = it }
+                    .backgroundDisplayTouchInput(
+                        isLive = bgIsLive,
+                        frame = bgLiveBmp,
+                        containerSize = { containerSize },
+                        onTapFeedback = { touchFeedback = it },
+                    ),
+                contentAlignment = Alignment.Center,
             ) {
-                // Top Header Row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(if (bgIsLive) Color(0xFF4ADE80) else Color.Gray, CircleShape),
-                        )
-                        val titleText = backgroundDisplayTakeoverTitle(takeoverState, activeDisplayId)
-                        Text(
-                            text = titleText,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White,
-                        )
-                    }
+                if (bgLiveBmp != null) {
+                    Image(
+                        bitmap = bgLiveBmp.asImageBitmap(),
+                        contentDescription = "Background Display HD Live",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    Text(
+                        text = backgroundDisplayTakeoverPlaceholder(takeoverState) ?: "",
+                        color = Color.Gray,
+                        fontSize = 13.sp,
+                    )
+                }
 
+                // 操作送达后迟迟没有新画面时的提示（不挡操作）；静止页面没人操作时不提示。
+                if (takeoverState == BackgroundDisplayTakeoverState.LIVE) {
+                    BackgroundDisplayNoFrameAfterActionHint(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .navigationBarsPadding()
+                            .padding(bottom = 68.dp),
+                    )
+                }
+
+                // Transient Touch Feedback Circle
+                touchFeedback?.let { pos ->
                     Box(
                         modifier = Modifier
-                            .size(28.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF2A2A32))
-                            .clickable(onClick = onDismiss),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = Color.White.copy(alpha = 0.85f),
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
+                            .offset { IntOffset(pos.x.toInt() - 16, pos.y.toInt() - 16) }
+                            .size(32.dp)
+                            .border(2.dp, Color(0xFF4ADE80), CircleShape)
+                            .background(Color(0xFF4ADE80).copy(alpha = 0.35f), CircleShape),
+                    )
                 }
+            }
 
-                // 状态说明：正在接管 / 启动中 / 已停止，以及怎么退出接管。
-                Text(
-                    text = backgroundDisplayTakeoverHint(takeoverState),
-                    fontSize = 11.sp,
-                    color = if (takeoverState == BackgroundDisplayTakeoverState.STOPPED) Color(0xFFFF9F43) else Color.White.copy(alpha = 0.6f),
-                    modifier = Modifier.padding(horizontal = 4.dp),
+            // 2. 顶部居中轻量提示（仅在已暂停时显示）
+            if (isPaused) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 12.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = "已暂停",
+                        fontSize = 11.sp,
+                        color = Color(0xFFFF9F43),
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+
+            // 3. 右上角极简半透明关闭按钮 ✕
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(top = 12.dp, end = 12.dp)
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .clickable(onClick = onDismiss),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.White.copy(alpha = 0.85f),
+                    modifier = Modifier.size(18.dp),
                 )
+            }
 
-                // Middle: HD Live Screen with Touch & Swipe Control
-                var containerSize by remember { mutableStateOf(IntSize.Zero) }
-                var touchFeedback by remember { mutableStateOf<Offset?>(null) }
-
-                LaunchedEffect(touchFeedback) {
-                    if (touchFeedback != null) {
-                        delay(400)
-                        touchFeedback = null
-                    }
-                }
-
+            // 4. 底部居中极简半透明悬浮胶囊栏（暂停 / 继续 / 前台）
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp)
+                    .fillMaxWidth(0.72f)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .alpha(if (controlsEnabled) 1f else 0.4f),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 1. 暂停
+                val pauseEnabled = controlsEnabled && isPauseButtonEnabled(bgIsLive, isPaused)
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF0A0A0D))
-                        .onSizeChanged { containerSize = it }
-                        .backgroundDisplayTouchInput(
-                            isLive = bgIsLive,
-                            frame = bgLiveBmp,
-                            containerSize = { containerSize },
-                            onTapFeedback = { touchFeedback = it },
-                        ),
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (pauseEnabled) Color.White.copy(alpha = 0.15f) else Color.Transparent)
+                        .clickable(enabled = pauseEnabled) {
+                            BackgroundDisplayManager.pause()
+                        }
+                        .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    if (bgLiveBmp != null) {
-                        Image(
-                            bitmap = bgLiveBmp.asImageBitmap(),
-                            contentDescription = "Background Display HD Live",
-                            contentScale = ContentScale.Fit,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    } else {
-                        Text(backgroundDisplayTakeoverPlaceholder(takeoverState) ?: "", color = Color.Gray, fontSize = 13.sp)
-                    }
-
-                    // 操作送达后迟迟没有新画面时的提示（不挡操作）；静止页面没人操作时不提示。
-                    if (takeoverState == BackgroundDisplayTakeoverState.LIVE) {
-                        BackgroundDisplayNoFrameAfterActionHint(modifier = Modifier.align(Alignment.BottomCenter))
-                    }
-
-                    // Transient Touch Feedback Circle
-                    touchFeedback?.let { pos ->
-                        Box(
-                            modifier = Modifier
-                                .offset { IntOffset(pos.x.toInt() - 16, pos.y.toInt() - 16) }
-                                .size(32.dp)
-                                .border(2.dp, Color(0xFF4ADE80), CircleShape)
-                                .background(Color(0xFF4ADE80).copy(alpha = 0.35f), CircleShape),
-                        )
-                    }
+                    Text(
+                        "暂停",
+                        fontSize = 12.sp,
+                        color = if (pauseEnabled) Color.White else Color.White.copy(alpha = 0.35f),
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
                 }
 
-                // Bottom Control Buttons Row: 暂停、继续、前台
-                Row(
+                // 2. 继续
+                val resumeEnabled = controlsEnabled && isResumeButtonEnabled(bgIsLive, isPaused)
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .alpha(if (controlsEnabled) 1f else 0.4f)
-                        .padding(top = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                        .weight(1f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (resumeEnabled) Color(0xFF4ADE80).copy(alpha = 0.25f) else Color.Transparent)
+                        .clickable(enabled = resumeEnabled) {
+                            BackgroundDisplayManager.resume()
+                        }
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    // 1. 暂停
-                    val pauseEnabled = controlsEnabled && isPauseButtonEnabled(bgIsLive, isPaused)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (pauseEnabled) Color(0xFF26262F) else Color(0xFF1E1E22))
-                            .clickable(enabled = pauseEnabled) {
-                                BackgroundDisplayManager.pause()
-                            }
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            "暂停",
-                            fontSize = 12.sp,
-                            color = if (pauseEnabled) Color.White else Color.White.copy(alpha = 0.35f),
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                        )
-                    }
+                    Text(
+                        "继续",
+                        fontSize = 12.sp,
+                        color = if (resumeEnabled) Color(0xFF4ADE80) else Color.White.copy(alpha = 0.35f),
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                }
 
-                    // 2. 继续
-                    val resumeEnabled = controlsEnabled && isResumeButtonEnabled(bgIsLive, isPaused)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (resumeEnabled) Color(0xFF26262F) else Color(0xFF1E1E22))
-                            .clickable(enabled = resumeEnabled) {
-                                BackgroundDisplayManager.resume()
+                // 3. 前台
+                val fgEnabled = controlsEnabled && isForegroundButtonEnabled(bgIsLive)
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (fgEnabled) Color(0xFF382BF0).copy(alpha = 0.45f) else Color.Transparent)
+                        .clickable(enabled = fgEnabled) {
+                            onDismiss()
+                            CoroutineScope(Dispatchers.IO).launch {
+                                BackgroundDisplayManager.switchToForeground(context)
                             }
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            "继续",
-                            fontSize = 12.sp,
-                            color = if (resumeEnabled) Color(0xFF4ADE80) else Color.White.copy(alpha = 0.35f),
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                        )
-                    }
-
-                    // 3. 前台
-                    val fgEnabled = controlsEnabled && isForegroundButtonEnabled(bgIsLive)
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(if (fgEnabled) Color(0xFF382BF0).copy(alpha = 0.35f) else Color(0xFF1E1E22))
-                            .clickable(enabled = fgEnabled) {
-                                onDismiss()
-                                CoroutineScope(Dispatchers.IO).launch {
-                                    BackgroundDisplayManager.switchToForeground(context)
-                                }
-                            }
-                            .padding(vertical = 10.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            "前台",
-                            fontSize = 12.sp,
-                            color = if (fgEnabled) Color(0xFF818CF8) else Color.White.copy(alpha = 0.35f),
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                        )
-                    }
+                        }
+                        .padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "前台",
+                        fontSize = 12.sp,
+                        color = if (fgEnabled) Color(0xFF818CF8) else Color.White.copy(alpha = 0.35f),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
                 }
             }
         }
